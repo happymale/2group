@@ -1,0 +1,42 @@
+name: "🐛 버그"
+description: "뭔가 고장났을 때"
+type: "Bug"
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: "무엇이 문제인가"
+      description: "버그 내용과, 원래 기대했던 동작."
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: "재현 방법"
+      placeholder: |
+        1. ...
+        2. ...
+        3. → 이렇게 됨
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: "환경"
+      description: "재현에 필요한 환경."
+      placeholder: |
+        머신:
+        실행 환경:
+        브랜치·커밋:
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: "참고/기타"
+      description: "선택 — 자유롭게 (로그, 스크린샷, 추측 등)."
+    validations:
+      required: false

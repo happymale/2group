@@ -1,0 +1,55 @@
+# Local agent/runtime state inside repo
+.agent/
+RUN_RESULT.md
+BLOCKED.md
+
+# Local data/artifacts if accidentally created inside repo
+data/
+results/
+/runner/
+worktrees/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Secrets/env
+.env
+*.env
+*.pem
+*.key
+*.token
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Eval artifacts
+*.jsonl
+*.log
+
+# Build output
+build/
+install/
+logs/
+log/
+
+# ROS bags
+*.bag
+*.bag.active
+*.mcap
+*.pcap
+*.db3
+
+# Local data / external clones
+external/
+
+# Local documentation environment
+.venv/

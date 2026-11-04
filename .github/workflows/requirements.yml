@@ -1,0 +1,34 @@
+name: Requirements
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: requirements-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.9.7'
+      - run: make requirements-check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: requirements-validation
+          path: build/requirements-report.json
+          if-no-files-found: ignore

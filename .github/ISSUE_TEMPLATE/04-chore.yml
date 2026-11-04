@@ -1,0 +1,19 @@
+name: "🧰 운영 / 잡무"
+description: "코드 외 — 환경 설정, 하드웨어 점검, 사무·행정"
+type: "Chore"
+body:
+  - type: textarea
+    id: task
+    attributes:
+      label: "할 일"
+      description: "뭘 해야 하나. (코드 변경 아님 — PR 없이 이슈만 열고 끝나면 닫기)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: "참고/기타"
+      description: "선택 — 자유롭게 (기한, 링크, 결과 등)."
+    validations:
+      required: false

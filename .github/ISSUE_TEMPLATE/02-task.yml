@@ -1,0 +1,27 @@
+name: "🛠️ 작업"
+description: "할 일"
+type: "Task"
+body:
+  - type: textarea
+    id: why
+    attributes:
+      label: "목적"
+      description: "왜 필요한가."
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: "목표"
+      description: "구체적 결과물. 이게 되면 끝."
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: "참고/기타"
+      description: "선택 — 자유롭게 (관련 파일/Notion 문서, 제약 등)."
+    validations:
+      required: false

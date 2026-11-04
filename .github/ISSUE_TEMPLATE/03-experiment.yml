@@ -1,0 +1,49 @@
+name: "🧪 실험 / 튜닝"
+description: "알고리즘 비교, 파라미터 튜닝, 시뮬 검증 기록"
+type: "Experiment"
+body:
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: "목적 / 가설"
+      description: "뭘 확인하려는가."
+      placeholder: "예) 조향 게인 ↑ 가 횡방향 오차를 줄이는가."
+    validations:
+      required: true
+
+  - type: textarea
+    id: setup
+    attributes:
+      label: "셋업"
+      placeholder: |
+        baseline:
+        변경 파라미터:
+        맵·데이터:
+    validations:
+      required: true
+
+  - type: textarea
+    id: metric
+    attributes:
+      label: "지표 / 기준"
+      placeholder: |
+        지표:
+        통과 기준:
+    validations:
+      required: true
+
+  - type: textarea
+    id: result
+    attributes:
+      label: "결과 / 결정"
+      description: "선택 — 실험 후 수치·링크·채택 여부."
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: "참고/기타"
+      description: "선택 — 자유롭게."
+    validations:
+      required: false

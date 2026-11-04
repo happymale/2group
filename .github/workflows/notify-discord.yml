@@ -1,0 +1,145 @@
+name: notify discord
+
+# Issue/PR 생명주기 알림을 Discord로 보낸다. 전송은 best-effort — 실패해도 막지 않는다.
+#
+# 설정:
+#   - repo variable ENABLE_DISCORD_NOTIFICATIONS : true일 때만 job 실행.
+#   - repo variable ENABLE_DISCORD_MENTIONS : true일 때만 USER_MAP의 실제 멘션 사용.
+#   - repo secret DISCORD_WEBHOOK : 채널 웹훅 URL. 없으면 조용히 skip.
+#   - repo variable DISCORD_USER_MAP (선택) : {"github로그인":"디스코드ID"} JSON.
+#     있으면 @멘션이 실제로 울리고, 없으면 @로그인 텍스트로만 표기한다.
+#   - 텍스트 채널이면 그대로, forum 채널이면 thread_name으로 자동 재시도.
+#
+# 어떤 메시지가 언제 (멘션 대상):
+#   issue assigned                      → 📌 이슈 담당 배정      (배정된 사람)
+#   PR opened(draft)                    → 🚧 작업 시작           (없음)
+#   review_requested                    → 🙋 리뷰 필요           (지정 리뷰어)
+#   ready/opened(비draft), 리뷰어 없을때 → 📢 리뷰 가능(넛지)     (없음)
+#   review submitted(승인/변경요청)      → 💬 리뷰 도착           (작성자 + linked issue assignee들)
+# PR 알림엔 연결 이슈(Resolves #N)를 embed 필드로 표시한다.
+on:
+  issues:
+    types: [assigned]
+  pull_request:
+    types: [opened, ready_for_review, review_requested]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  notify:
+    if: ${{ vars.ENABLE_DISCORD_NOTIFICATIONS == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Post to Discord
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          USER_MAP: ${{ vars.DISCORD_USER_MAP }}
+          MENTIONS_ENABLED: ${{ vars.ENABLE_DISCORD_MENTIONS }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if [ -z "${WEBHOOK:-}" ]; then echo "DISCORD_WEBHOOK 미설정 — skip"; exit 0; fi
+          E="$GITHUB_EVENT_PATH"
+          OWNER="${GITHUB_REPOSITORY%%/*}"; REPO_N="${GITHUB_REPOSITORY#*/}"
+          # mention mode가 아니거나 map이 비어 있으면 실제 Discord ping을 만들지 않는다.
+          # 인라인 "${USER_MAP:-{}}"는 bash가 첫 }에서 끊어 JSON이 깨지므로 쓰지 않는다.
+          if [ "${MENTIONS_ENABLED:-false}" != true ] || [ -z "${USER_MAP:-}" ]; then
+            USER_MAP='{}'
+          fi
+
+          # github 로그인 하나 -> "<@디스코드ID>"(있으면 핑) 또는 "@로그인"(표기만)
+          mention_one() {
+            local login="$1" id
+            id=$(jq -r --arg l "$login" '.[$l] // empty' <<<"$USER_MAP" 2>/dev/null)
+            if [ -n "$id" ]; then printf '<@%s>' "$id"; else printf '@%s' "$login"; fi
+          }
+          mentions() {
+            local seen=" " out="" l
+            for l in "$@"; do
+              [ -z "$l" ] && continue
+              case "$seen" in *" $l "*) continue ;; esac
+              seen="$seen$l "; out="$out$(mention_one "$l") "
+            done
+            printf '%s' "${out% }"
+          }
+          # PR 번호 -> 연결 이슈들의 {number, assignee logins}
+          pr_link_json() {
+            gh api graphql -f query='
+              query($o:String!,$r:String!,$n:Int!){
+                repository(owner:$o,name:$r){ pullRequest(number:$n){
+                  closingIssuesReferences(first:10){ nodes{ number assignees(first:20){ nodes{ login } } } } } }
+              }' -F o="$OWNER" -F r="$REPO_N" -F n="$1" \
+              --jq '.data.repository.pullRequest.closingIssuesReferences.nodes' 2>/dev/null || echo "[]"
+          }
+
+          title=""; content=""; url=""; by=""; link=""
+          case "$GITHUB_EVENT_NAME" in
+            issues)
+              [ "$(jq -r '.action' "$E")" = "assigned" ] || exit 0
+              who=$(jq -r '.assignee.login // empty' "$E"); [ -z "$who" ] && exit 0
+              num=$(jq -r '.issue.number' "$E"); ttl=$(jq -r '.issue.title' "$E"); url=$(jq -r '.issue.html_url' "$E")
+              title="📌 이슈 담당 배정: #${num} ${ttl}"; content="$(mentions "$who") 담당 배정됨 — 작업 시작하세요"
+              ;;
+            pull_request_review)
+              num=$(jq -r '.pull_request.number' "$E"); ttl=$(jq -r '.pull_request.title' "$E")
+              url=$(jq -r '.pull_request.html_url' "$E"); by=$(jq -r '.pull_request.user.login' "$E")
+              state=$(jq -r '.review.state' "$E")
+              case "$state" in
+                approved)          title="💬 승인됨: #${num} ${ttl}"; verb="리뷰 승인 ✅" ;;
+                changes_requested) title="💬 변경 요청: #${num} ${ttl}"; verb="변경 요청 🔧" ;;
+                *) echo "단순 코멘트 — skip"; exit 0 ;;
+              esac
+              lj=$(pr_link_json "$num")
+              link=$(jq -r '[.[].number]|map("#\(.)")|join(", ")' <<<"$lj")
+              asg=$(jq -r '[.[].assignees.nodes[].login]|unique|.[]' <<<"$lj" | tr '\n' ' ')
+              content="$(mentions "$by" $asg) $verb"
+              ;;
+            pull_request)
+              num=$(jq -r '.pull_request.number' "$E"); ttl=$(jq -r '.pull_request.title' "$E")
+              url=$(jq -r '.pull_request.html_url' "$E"); by=$(jq -r '.pull_request.user.login' "$E")
+              draft=$(jq -r '.pull_request.draft' "$E")
+              case "$(jq -r '.action' "$E")" in
+                review_requested)
+                  rv=$(jq -r '.requested_reviewer.login // empty' "$E")
+                  if [ -z "$rv" ]; then echo "팀 리뷰어 요청 — skip"; exit 0; fi
+                  title="🙋 리뷰 필요: #${num} ${ttl}"; content="$(mentions "$rv") 리뷰 요청됨" ;;
+                opened|ready_for_review)
+                  if [ "$draft" = "true" ]; then
+                    title="🚧 작업 시작 (draft): #${num} ${ttl}"; content="$(mentions "$by") 작업 시작"
+                  else
+                    n=$(jq -r '.pull_request.requested_reviewers | length' "$E")
+                    if [ "$n" -gt 0 ]; then echo "리뷰어 지정됨 — review_requested가 처리, skip"; exit 0; fi
+                    title="📢 리뷰 가능 (리뷰어 미지정): #${num} ${ttl}"; content="$(mentions "$by") 리뷰어 지정 필요"
+                  fi ;;
+                *) echo "미대상 — skip"; exit 0 ;;
+              esac
+              link=$(jq -r '[.[].number]|map("#\(.)")|join(", ")' <<<"$(pr_link_json "$num")")
+              ;;
+            *) echo "미대상 이벤트 — skip"; exit 0 ;;
+          esac
+
+          desc="$GITHUB_REPOSITORY"; [ -n "$by" ] && desc="$desc — by $by"
+          # PR 알림엔 연결 이슈 필드 추가 (없으면 생략)
+          fields="[]"
+          if [ -n "$link" ]; then
+            fields=$(jq -n --arg v "$link" '[{name:"연결 이슈", value:$v, inline:true}]')
+          fi
+          embed=$(jq -n --arg t "$title" --arg u "$url" --arg d "$desc" --argjson f "$fields" \
+                    '{title:$t, url:$u, description:$d, color:5814783, fields:$f}')
+          payload=$(jq -n --arg c "$content" --argjson e "$embed" '{content:$c, embeds:[$e]}')
+
+          # 텍스트 채널 우선 → 실패(forum 등)면 thread_name 붙여 재시도 → 그래도 실패면 경고만(비차단)
+          if curl -sf -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK" >/dev/null; then
+            echo "sent (text)"
+          elif curl -sf -H 'Content-Type: application/json' \
+                 -d "$(jq --arg tn "$title" '. + {thread_name:$tn}' <<<"$payload")" "$WEBHOOK" >/dev/null; then
+            echo "sent (forum)"
+          else
+            echo "::warning::Discord 전송 실패 — webhook URL/secret 확인 (알림만 실패, 막지 않음)"
+          fi
