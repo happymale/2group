@@ -6,11 +6,11 @@
 
 bootstrap 때 기록하고, 선택을 바꾸면 함께 고친다. 답하지 않은 항목을 OFF로 추정하지 않는다.
 
-- StrictDoc: 미선택 (ON / OFF). `heven.toml`이 기준이다.
-- 저장소 전용 Notion: 미선택 (ON / OFF). 공통 Notion 가이드는 항상 유지한다.
-- Discord 알림 / 멘션: 미선택 (각각 ON / OFF)
-- Codex PR 리뷰: 미선택 (ON / OFF)
-- runner 머신: 미선택
+- StrictDoc: OFF (요구사항 정본은 heven-hackathon-2026-dev). `heven.toml`이 기준이다.
+- 저장소 전용 Notion: OFF. 공통 Notion 가이드는 항상 유지한다.
+- Discord 알림 / 멘션: OFF / OFF
+- Codex PR 리뷰: OFF
+- runner 머신: heven-right
 - Project 상태 전환: 항상 사용 (self-hosted runner + `PROJECT_PAT`)
 
 ## 원본과의 차이

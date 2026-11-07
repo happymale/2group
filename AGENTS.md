@@ -14,7 +14,7 @@
 | repo별 Notion hub | domain·대회·hardware·환경·제약 |
 
 - 공통 가이드: [heven-common repo wiki](https://app.notion.com/p/39c3bf068300807c9e5bcf6b469f94ee)
-- 현재 repo hub: `<NOTION_REPO_URL>`
+- 현재 repo hub: `사용 안 함 (NOTION_MODE=disabled)`
 - Notion enabled인 경우 domain·대회·hardware·환경·제약에 관련된 작업은 Notion MCP로 repo별 hub를 먼저 읽는다. 공통 가이드만 보고 repo 제약을 추측하지 않는다.
 - Notion disabled이면 저장소 문서를 사용한다.
 - Notion에 접근할 수 없으면 Notion 명세가 필요한 작업만 멈추고, 일반 코드·CI 작업은 계속한다.

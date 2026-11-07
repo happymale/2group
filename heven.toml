@@ -1,6 +1,6 @@
 [template]
 # 이 저장소의 기준이 되는 heven-common 커밋. bootstrap과 템플릿 반영 때 갱신한다.
-commit = ""
+commit = "c686f7e07a931810ccd7a8b15d03db64814f8167"
 
 [requirements]
 enabled = false
