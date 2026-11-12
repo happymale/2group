@@ -16,12 +16,12 @@ $DesktopPort = if ($env:HEVEN_DESKTOP_PORT) { $env:HEVEN_DESKTOP_PORT } else { "
 
 function Need-Docker {
   if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw "Docker가 없습니다. 안내서대로 Docker Desktop을 먼저 설치하세요." }
-  docker info *> $null
+  cmd /d /c "docker info >nul 2>&1"
   if ($LASTEXITCODE -ne 0) { throw "Docker Desktop이 실행 중이 아닙니다. 켠 뒤 다시 실행하세요." }
 }
 
 function Get-Image {
-  docker image inspect $Image *> $null
+  cmd /d /c "docker image inspect $Image >nul 2>&1"
   if ($LASTEXITCODE -eq 0) { return }
   $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
   $f = Join-Path $Here "images\heven-$arch.tar.gz"
@@ -58,7 +58,7 @@ function Is-Running { [bool](docker ps --format "{{.Names}}" | Where-Object { $_
 function Start-Sim {
   Need-Docker; Get-Image; Prepare-Dirs
   if (Is-Running) { Write-Host "이미 실행 중입니다." } else {
-    docker rm -f $Name *> $null
+    cmd /d /c "docker rm -f $Name >nul 2>&1"
     docker run -d --name $Name -p "127.0.0.1:${Port}:8080" -p "127.0.0.1:${DesktopPort}:6080" `
       -v "${HomeDir}\mit_ws:/mit_ws" -v "${HomeDir}\morai_ws:/morai_ws" -v "${HomeDir}\data:/data" $Image | Out-Null
   }
