@@ -2,7 +2,9 @@
 
 HEVEN 2026 Docker 배포본 기반 참가자 실행 환경·스켈레톤·사용 문서.
 
-## 이 레포에서 수정할 MIT 주행 코드
+## 이 레포에서 수정할 주행 코드
+
+### MIT
 
 실제 참가자 패키지는 [`mit_ws/src/hk_mit`](mit_ws/src/hk_mit)에 있습니다.
 
@@ -32,6 +34,28 @@ cd /mit_ws
 colcon build --packages-select hk_mit
 source install/setup.bash
 ros2 launch hk_mit bringup.launch.py
+```
+
+### MORAI
+
+실제 참가자 패키지는 [`morai_ws/src/hk_morai`](morai_ws/src/hk_morai)에 있습니다.
+
+- [`localization.py`](morai_ws/src/hk_morai/hk_morai/localization.py): 위치 추정
+- [`planner.py`](morai_ws/src/hk_morai/hk_morai/planner.py): 경로 계획
+- [`control.py`](morai_ws/src/hk_morai/hk_morai/control.py): 조향·속도 제어
+- [`lidar_perception.py`](morai_ws/src/hk_morai/hk_morai/lidar_perception.py): LiDAR 입력
+- [`camera_perception.py`](morai_ws/src/hk_morai/hk_morai/camera_perception.py): 카메라 입력 스켈레톤
+- `config/`, `launch/`, `course/`, `rviz/`: 설정·실행·MORAI 코스·시각화 자료
+
+MIT와 동일하게 기존 로컬 작업 폴더에서 패키지 자료와 소스를 변경 없이 가져왔습니다.
+위의 `HEVEN_HOME` 설정으로 레포를 연결하면 Docker 안에서 `/morai_ws`로 보입니다.
+참가자 Docker에서는 다음 명령으로 빌드할 수 있습니다. MORAI 시뮬레이터 자체는 운영진 PC에서 실행되며,
+이 레포에는 포함되지 않습니다. 실제 연결·주행 검증은 아직 수행하지 않았습니다.
+
+```bash
+cd /morai_ws
+colcon build --packages-select hk_morai
+source install/setup.bash
 ```
 
 > **대회 안내(정본): [2026 성균관대 자율주행 해커톤 Notion](https://app.notion.com/p/2026-416a48b57a16808e8bc0c0f4e688aed3)** — 시간표, 실행 방법, 기본 코드, 규정이 모두 여기에 있습니다.

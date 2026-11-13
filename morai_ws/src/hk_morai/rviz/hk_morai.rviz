@@ -1,0 +1,68 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Reference Frame: map
+      Plane Cell Count: 100
+      Cell Size: 5
+      Color: 160; 160; 164
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: false
+      Marker Scale: 2
+    - Class: rviz_default_plugins/Odometry
+      Name: "Estimate /hk/local/odom"
+      Enabled: true
+      Topic:
+        Value: /hk/local/odom
+      Keep: 200
+      Shape:
+        Value: Arrow
+        Color: 255; 170; 0
+        Shaft Length: 1.5
+        Head Length: 0.5
+      Covariance:
+        Value: false
+    - Class: rviz_default_plugins/Path
+      Name: "Plan /hk/plan/local_path"
+      Enabled: true
+      Topic:
+        Value: /hk/plan/local_path
+      Color: 60; 160; 255
+      Line Style: Billboards
+      Line Width: 0.15
+    - Class: rviz_default_plugins/PointCloud2
+      Name: "LiDAR /hk/sensors/lidar/points"
+      Enabled: true
+      Topic:
+        Value: /hk/sensors/lidar/points
+        Reliability Policy: Best Effort
+      Size (m): 0.05
+      Style: Points
+      Color Transformer: AxisColor
+      Axis: Z
+  Global Options:
+    Fixed Frame: map
+    Background Color: 40; 40; 40
+    Frame Rate: 15
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Target Frame: base_link
+      Scale: 12
+      Angle: 0
+      X: 0
+      Y: 0
+Window Geometry:
+  Width: 1400
+  Height: 850

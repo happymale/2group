@@ -1,0 +1,17 @@
+# MORAI 기본 코드 노드 설정. 비운 파일 경로는 이 패키지 course/의 MORAI 코스 파일을 씁니다.
+hk_morai_localization:
+  ros__parameters:
+    course_json: ""               # 출발·체크포인트 자세와 지도 원점 (morai_course.json)
+hk_morai_planner:
+  ros__parameters:
+    ahead_m: 30.0                 # 차 앞으로 내보낼 경로 길이 (m)
+    behind_m: 2.0                 # 차 뒤로 남길 경로 길이 (m)
+    route_csv: ""                 # 전역 경로 (morai_global_path.csv, 0.5 m 간격)
+hk_morai_control:
+  ros__parameters:
+    target_speed: 3.0             # 목표 속력 (m/s)
+    k_stanley: 1.0                # Stanley: 옆으로 벗어난 거리에 대한 조향 세기
+    k_soft: 1.0                   # Stanley: 저속에서 조향이 너무 세지지 않게 (m/s)
+    kp: 0.5                       # 속력 P 이득
+    ki: 0.05                      # 속력 I 이득
+    brake_gain: 0.6               # 너무 빠를 때 제동 세기

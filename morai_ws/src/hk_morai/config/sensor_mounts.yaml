@@ -1,0 +1,21 @@
+# MORAI 대회 차량(IONIQ 5) 센서 장착 위치. bringup.launch.py가 이 값으로 센서 TF(/tf_static)를 냅니다.
+# 위치는 후륜 차축 중심(rear_axle_link) 기준 m, 각도는 도(roll, pitch, yaw). x 앞, y 왼쪽, z 위.
+axle_height_m: 0.3685   # 후륜 차축 중심의 지면 높이 (base_link -> rear_axle_link)
+
+gps: {x: 0.0, y: 0.0, z: 1.2, roll: 0.0, pitch: 0.0, yaw: 0.0}
+imu: {x: 0.0, y: 0.0, z: 1.2, roll: 0.0, pitch: 0.0, yaw: 0.0}
+
+lidar:             # 16-channel VLP-16 style, 10 Hz, 100 m, UDP 2368
+  enabled: true
+  x: 1.15
+  y: 0.0
+  z: 1.4
+  roll: 0.0
+  pitch: 0.0
+  yaw: 0.0
+
+cameras:
+  front:         {enabled: true, x: 1.90, y: 0.00, z: 1.2, roll: 0.0, pitch: 2.0, yaw: 0.0, width: 1280, height: 720, fov_deg: 90.0, hz: 20}
+  left:          {enabled: true, x: 1.15, y: 0.65, z: 1.2, roll: 0.0, pitch: 10.0, yaw: 70.0, width: 640, height: 480, fov_deg: 130.0, hz: 20}
+  right:         {enabled: true, x: 1.15, y: -0.65, z: 1.2, roll: 0.0, pitch: 10.0, yaw: 290.0, width: 640, height: 480, fov_deg: 130.0, hz: 20}
+  traffic_light: {enabled: true, x: 1.90, y: 0.00, z: 1.2, roll: 0.0, pitch: 330.0, yaw: 0.0, width: 1280, height: 720, fov_deg: 90.0, hz: 20}
