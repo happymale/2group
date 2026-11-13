@@ -1,0 +1,32 @@
+--- src/hk_mit/config/bringup.yaml	2026-11-14 00:29:16.179768800 +0900
++++ agents/roundabout/src/hk_mit/config/bringup.yaml	2026-11-14 01:47:11.129600000 +0900
+@@ -35,6 +35,29 @@
+     obstacle_timeout: 0.5 
+     odom_timeout: 0.5 
+     clock_tolerance: 0.05          # 노드 간 /clock 전달 순서 차이 (s)
++    # 회전교차로 (roundabout.py). route.csv의 진입·진출 꺾임(R≈2.5)을 접선 원호로 바꾸고 NPC에 양보·차간 유지
++    roundabout_enabled: true
++    roundabout_entry_radius: 7.25  # 진입 원호 반지름 (뒤차축, m). 7~7.5에서 차체 통로 여유 최대(약 +0.4 m, 정확 추종 시)
++    roundabout_exit_radius: 7.25   # 진출 원호 반지름 (m)
++    roundabout_ring_offset: 0.0    # 우리 링 반지름 = NPC 반지름(11 m) + 이 값
++    roundabout_smooth_m: 2.5       # 곡률이 바뀌는 곳을 둥글리는 길이 (m, 조향 속도)
++    roundabout_cut_bias: 1.8       # 원호에서 안쪽으로 파고드는 것 보상: 제어 경로를 바깥으로 이 값 × 곡률 (R 7.25 → 0.25 m)
++    roundabout_speed: 4.0          # 정지 위치 ~ 진출 직선 속력 상한 (m/s). NPC(약 3.6 m/s)보다 빠르게
++    roundabout_stop_radius: 13.5   # 양보 정지 위치: 앞 범퍼가 링 중심에서 이 거리 (NPC 바깥 면 약 11.95 m)
++    npc_rate: 0.33                 # NPC 각속도 사전값 (rad/s, 관측 0.32~0.37, 반시계)
++    npc_track_timeout: 2.5         # 관측 없이 NPC 추적을 유지하는 시간 (s)
++    npc_gap_behind: 7.0            # 합류 순간 뒤 NPC 중심이 합류점에서 이만큼(호 m) 뒤에 있어야 진입
++    npc_gap_ahead: 7.5             # 합류 순간 앞 NPC 중심이 합류점에서 이만큼 앞에 있어야 진입
++    npc_follow_gap: 9.0            # 앞 NPC 중심 ~ 우리 뒤차축 최소 거리 (경로·호 m, 범퍼 간격 약 2.9 m)
++    merge_accel: 1.5               # 합류 시각 예측 가속도 (m/s²)
++    yield_decel: 2.0               # 정지 위치에 서는 감속도 (m/s²)
++    yield_timeout: 20.0            # 이만큼 서 있어도 틈이 없으면 진입 (s, 허상 추적·인지 끊김으로 영영 서는 것 방지)
++    collision_zones: [-1.0]        # 경로 위 물체 속력 제한 구간 [s0, s1, ...]. -1 = 회전교차로 정지 위치 30 m 앞 ~ 진출 10 m 뒤
++    collision_min_points: 3        # 이보다 적은 점의 군집은 무시 (LiDAR 잡음)
++    collision_decel: 3.0           # 경로 위 물체 앞 감속도 (m/s²)
++    collision_stop_gap: 3.0        # 물체와 앞 범퍼 사이에 남길 거리 (m)
++    collision_half_width: 1.2      # 경로에서 이 거리 안의 관측점을 경로 위 물체로 봄 (m)
++    collision_horizon: 25.0        # 이만큼 앞까지 검사 (m)
+ hk_mit_lidar_perception:
+   ros__parameters:
+     record_csv: false

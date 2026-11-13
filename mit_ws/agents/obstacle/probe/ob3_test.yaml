@@ -1,0 +1,17 @@
+# 모든 옵션(노이즈·지연·미션)을 켤 때 bringup.yaml 위에 덮어쓰는 값.
+#   ros2 launch hk_mit bringup.launch.py extra_params:=/mit_ws/install/hk_mit/share/hk_mit/config/all_options.yaml
+hk_mit_planner:
+  ros__parameters:
+    # 장애물 구간은 벽이 y=±3.75 (폭 7.5 m, course.json mission zone). 좁은 통로(4.392 m)의 벽은
+    # LiDAR 충돌 검사가 막으므로 가상 경계는 넓은 구간 기준으로 둡니다 (2.196이면 회피 후보가 전부 road_boundary)
+    road_half_width: 3.75
+    lateral_offsets: [-2.3, -2.0, -1.6, -1.0, 0.0, 1.0, 1.6, 2.0, 2.3]
+    obstacle_timeout: 1.0         # 정지 장애물은 map 좌표로 1 s 지나도 유효. CPU 부하로 한 스캔이 늦어도 멈추지 않게
+    odom_timeout: 0.5
+    safety_margin: 0.2
+    surface_padding: 0.15
+    # 저마찰 S자(cp2→cp3)는 3.4 m/s 넘으면 미끄러져 감점 (동역학 시험 dyn_lf0~4)
+    speed_zones: [56.0, 165.0, 3.4]
+hk_mit_control:
+  ros__parameters:
+    latency_s: 0.1                # 시험용: 조향 지연 옵션 없음

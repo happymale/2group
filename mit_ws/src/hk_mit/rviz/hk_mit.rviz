@@ -61,6 +61,16 @@ Visualization Manager:
       Style: Flat Squares
       Color Transformer: FlatColor
       Color: 255; 60; 60
+    - Class: rviz_default_plugins/MarkerArray
+      Name: "Obstacle contours and cluster IDs"
+      Enabled: true
+      Topic:
+        Value: /hk/perception/markers
+    - Class: rviz_default_plugins/MarkerArray
+      Name: "Avoidance candidates, rejection reasons, footprints"
+      Enabled: true
+      Topic:
+        Value: /hk/plan/avoidance_markers
   Global Options:
     Fixed Frame: map
     Background Color: 40; 40; 40

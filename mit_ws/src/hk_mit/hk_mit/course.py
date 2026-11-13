@@ -19,6 +19,19 @@ def declare_file_params(node):
     node.declare_parameter('course_json', '')
 
 
+def files_signature(node, *extra):
+    """경로·코스 파일 경로와 수정 시각 (+ extra). 시작(START)마다 파일을 다시 읽어 경로·속도 프로파일을 새로 만들면
+    planner가 0.3~1 s 멈춰 출발이 0.5~2 s 늦어지므로, 이 값이 같으면 지난번 것을 그대로 씁니다."""
+    sig = list(extra)
+    for name, default in (('route_csv', 'route.csv'), ('course_json', 'course.json')):
+        path = node.get_parameter(name).value or str(COURSE_DIR / default)
+        try:
+            sig.append((path, Path(path).stat().st_mtime_ns))
+        except OSError:
+            sig.append((path, None))
+    return tuple(sig)
+
+
 def load_course(node):
     return Course(node.get_parameter('course_json').value or str(COURSE_DIR / 'course.json'))
 
@@ -61,12 +74,14 @@ class Route:
         """시작·복귀: 다음 nearest()는 경로 전체에서 찾습니다."""
         self.idx = None
 
-    def nearest(self, x, y):
+    def nearest(self, x, y, end=None):
         """(x, y)에서 가장 가까운 경로 점의 번호. 시작·복귀 직후에는 경로 전체에서, 그 뒤에는 지난번 점부터
-        앞쪽 40 m에서만 찾습니다(되돌아가지 않게)."""
+        앞쪽 40 m에서만 찾습니다(되돌아가지 않게). end를 주면 그 번호 앞까지만 (주차 동작의 정지 지점을 넘지 않게)."""
         pts = self.points
         start = 0 if self.idx is None else self.idx
-        end = len(pts) if self.idx is None else min(self.idx + 80, len(pts))
+        limit = len(pts) if end is None else min(end, len(pts))
+        end = limit if self.idx is None else min(self.idx + 80, limit)
+        start = min(start, end - 1)
         self.idx = min(range(start, end), key=lambda i: math.hypot(pts[i][0] - x, pts[i][1] - y))
         return self.idx
 

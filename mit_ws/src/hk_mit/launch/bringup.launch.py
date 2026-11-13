@@ -3,8 +3,10 @@
     ros2 launch hk_mit bringup.launch.py
 Inside the participant image (./run.sh shell, in /mit_ws). The course files are this package's course/ folder
 (route.csv, course.json; the simulator also writes the same files per attempt to /data/current/).
-Arguments: target_speed (m/s, default 5.0), rviz:=true (RViz: in the ./run.sh desktop), perception:=true (also start the LiDAR
-perception nodes, which only subscribe), sensor_tf:=false (do not publish the sensor TF).
+Arguments: target_speed (m/s, straight-line maximum, default 14.0), rviz:=true, avoidance:=false (reference-only driving),
+perception:=false (disable perception; avoidance will stop without observations),
+record_lidar_csv:=true (opt-in CSV recording), lidar_csv_path:=/tmp/lidar.csv,
+sensor_tf:=false (do not publish the sensor TF). Avoidance and perception default to true.
 Each node can be replaced by your own (Python or C++) as long as it uses the same topics:
     /hk/local/odom (nav_msgs/Odometry), /hk/plan/local_path (nav_msgs/Path), /hk/control/command.
 
@@ -23,6 +25,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 PKG = 'hk_mit'
 
@@ -62,19 +65,32 @@ def generate_launch_description():
     sim_time = {'use_sim_time': arg('use_sim_time')}
     files = {'course_json': arg('course_json'), 'route_csv': arg('route_csv')}
     perception = IfCondition(arg('perception'))
+    extra = arg('extra_params')
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='true', description='MIT: the simulator /clock'),
         DeclareLaunchArgument('course_json', default_value='', description='empty: share/hk_mit/course/course.json'),
         DeclareLaunchArgument('route_csv', default_value='', description='empty: share/hk_mit/course/route.csv'),
-        DeclareLaunchArgument('target_speed', default_value='5.0', description='m/s'),
+        DeclareLaunchArgument('target_speed', default_value='14.0', description='m/s, straight-line maximum'),
         DeclareLaunchArgument('rviz', default_value='false'),
-        DeclareLaunchArgument('perception', default_value='false', description='true: also start the perception nodes'),
+        DeclareLaunchArgument('avoidance', default_value='true', description='enable static-obstacle Frenet avoidance'),
+        DeclareLaunchArgument('perception', default_value='true', description='start the LiDAR perception node'),
+        DeclareLaunchArgument('record_lidar_csv', default_value='false', description='opt-in CSV recording'),
+        DeclareLaunchArgument('lidar_csv_path', default_value='', description='empty: timestamped CSV in ~/hk_mit_data; existing files are not overwritten'),
         DeclareLaunchArgument('sensor_tf', default_value='true', description='publish the sensor TF from config/sensor_mounts.yaml'),
-        Node(package=PKG, executable='localization', output='screen', parameters=[cfg, sim_time, files]),
-        Node(package=PKG, executable='planner', output='screen', parameters=[cfg, sim_time, files]),
+        DeclareLaunchArgument('extra_params', default_value=cfg,
+                              description='extra parameter yaml applied after config/bringup.yaml (e.g. config/all_options.yaml)'),
+        Node(package=PKG, executable='localization', output='screen', parameters=[cfg, extra, sim_time, files]),
+        Node(package=PKG, executable='planner', output='screen', parameters=[cfg, extra, sim_time, files, {
+            'avoidance_enabled': ParameterValue(arg('avoidance'), value_type=bool),
+            'cruise_speed': ParameterValue(arg('target_speed'), value_type=float),
+        }]),
         Node(package=PKG, executable='control', output='screen',
-             parameters=[cfg, sim_time, {'target_speed': arg('target_speed')}]),
-        Node(package=PKG, executable='lidar_perception', output='screen', condition=perception, parameters=[sim_time]),
+             parameters=[cfg, extra, sim_time, {'target_speed': arg('target_speed')}]),
+        Node(package=PKG, executable='lidar_perception', output='screen', condition=perception,
+             parameters=[cfg, extra, sim_time, {
+                 'record_csv': ParameterValue(arg('record_lidar_csv'), value_type=bool),
+                 'csv_path': ParameterValue(arg('lidar_csv_path'), value_type=str),
+             }]),
         Node(package='robot_state_publisher', executable='robot_state_publisher', name='hk_mit_robot_state_publisher',
              output='screen', condition=IfCondition(arg('sensor_tf')),
              parameters=[sim_time, {'robot_description': description}]),

@@ -1,0 +1,7 @@
+# MIT 시뮬레이터 차량(IONIQ 5) 센서 장착 위치(시뮬레이터에 고정). bringup.launch.py가 이 값으로 센서 TF(/tf_static)를 냅니다.
+# 위치는 후륜 차축 중심(rear_axle_link) 기준 m, 각도는 도(roll, pitch, yaw). x 앞, y 왼쪽, z 위. MIT에는 카메라가 없습니다.
+axle_height_m: 0.3685
+gps: {x: 0.0, y: 0.0, z: 1.2, roll: 0.0, pitch: 0.0, yaw: 0.0}
+imu: {x: 0.0, y: 0.0, z: 1.2, roll: 0.0, pitch: 0.0, yaw: 0.0}
+lidar: {enabled: true, x: 1.15, y: 0.0, z: 1.4, roll: 0.0, pitch: 0.0, yaw: 0.0}
+cameras: {}

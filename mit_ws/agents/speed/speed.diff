@@ -1,0 +1,739 @@
+diff -ruN -x __pycache__ -x '*.pyc' src/hk_mit/config/all_options.yaml agents/speed/src/hk_mit/config/all_options.yaml
+--- src/hk_mit/config/all_options.yaml	2026-11-13 16:56:04.721617800 +0000
++++ agents/speed/src/hk_mit/config/all_options.yaml	2026-11-13 18:03:04.646018100 +0000
+@@ -12,13 +12,26 @@
+     surface_padding: 0.15
+     # 저마찰 S자(cp2→cp3)는 3.4 m/s 넘으면 미끄러져 감점 (동역학 시험 dyn_lf0~4)
+     # GNSS 음영 S자(cp10→cp11)는 위치 추정 횡오차가 0.6~0.9 m라 8 m/s로 제한 (12.5 m/s면 s=609 감점, tu_b7)
+-    speed_zones: [56.0, 165.0, 3.4, 575.0, 660.0, 8.0]
++    # (GNSS 음영 8 m/s 상한은 LiDAR 벽 측정으로 위치 오차가 0.6~1.1 → 0.05 m 수준이 되어 없앰)
++    # 경사 S자(cp4→cp5, R 6.9) 6.0 m/s 상한: corner_lateral_accel 6.0(≈6.4 m/s)이면 S자 전환(s 245~255)에서 안쪽을
++    # 0.8~0.9 m 파고들어 실제 여유(LiDAR 기준) 0.17~0.39 m (sp_w3_s0~s2, sp_w4_s2)
++    speed_zones: [56.0, 165.0, 3.4, 185.0, 272.0, 6.0]
+     # 조향 지연(실측: 0.05 s 지연 + 0.22 s 1차 지연)이 있으면 S자(cp4→cp5)에서 7 → 감점, 6 → 여유 0.28~0.42, 5.5 → 0.45~0.5 m
+     # (저마찰 S자는 위 3.4 상한이 먼저 걸림. 3.7이면 s=80에서 미끄러져 감점, tu_c1)
+-    corner_lateral_accel: 5.5    # 6.0이면 0.5~0.7 s 빠르지만 seed 2에서 cp4→cp5 여유 0.25 m (tu_fin_s2) → 감점 위험이 커서 5.5
+-    profile_decel: 4.0            # 구동 지연 75 ms + 내리막(경사 구간)에서 감속이 늦음
++    corner_lateral_accel: 6.0    # (벽 측정 전) 6.0이면 0.5~0.7 s 빠르지만 seed 2에서 cp4→cp5 여유 0.25 m (tu_fin_s2) → 감점 위험이 커서 5.5
++    profile_decel: 5.0            # 구동 지연 75 ms + 내리막(경사 구간)에서 감속이 늦음 (4.0 → 5.0 시험, brake=1이면 8.5)
+     speed_preview_s: 0.8
++    # 회전교차로 정지 위치 ~ 진출 직선 상한. 링 구간은 NPC 추종 상한(follow_speed)이 따로 걸림
++    roundabout_speed: 5.5
++hk_mit_localization:
++  ros__parameters:
++    # LiDAR 벽 측정 (wall_match.py). 기본값은 localization.py PARAMS
++    wall_enabled: true
++    corridor_width: 0.0          # 0 = 시도 코스 파일(/data/current/course.json)의 corridor_width_m (도로 폭 단계 반영)
++    wall_inflation: 4.0          # 점들 사이 상관 → 측정 공분산 배율
++    wall_zone_margin: 18.0       # 장애물·주차·회전교차로 구간 앞뒤 이만큼 벽을 쓰지 않음 (실측 폭 변화 구간 ≤ 15 m)
+ hk_mit_control:
+   ros__parameters:
+     # 조향 지연 옵션: 0.2면 곡선 진입이 늦어(s=230 감점), 0.35면 너무 일찍 꺾어 안쪽을 파고듦(s=246 감점)
+     latency_s: 0.3
++    k_offset: 0.0                # 0.5 시험: 곡선 중간 안쪽 파고듦은 줄지만 S자 전환에서 바깥→안쪽 흔들림이 커져 여유 0.35 → 0.07~0.11 (sp_seg_off5, off5b)
+diff -ruN -x __pycache__ -x '*.pyc' src/hk_mit/hk_mit/control.py agents/speed/src/hk_mit/hk_mit/control.py
+--- src/hk_mit/hk_mit/control.py	2026-11-13 16:56:04.586900900 +0000
++++ agents/speed/src/hk_mit/hk_mit/control.py	2026-11-13 18:03:04.761194700 +0000
+@@ -21,6 +21,7 @@
+ from rclpy.node import Node
+ from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+ 
++from geometry_msgs.msg import TwistStamped
+ from nav_msgs.msg import Odometry, Path
+ from sensor_msgs.msg import Imu
+ from std_msgs.msg import Float32
+@@ -42,6 +43,7 @@
+     'k_curvature': 0.0,    # 경로 곡률 피드포워드 비율 (0 = 끔. Stanley 방향 오차가 이미 곡률을 반영)
+     'k_yaw_rate': 0.0,     # 요레이트 감쇠 (고속 진동이 생기면 0.05~0.1)
+     'k_offset': 0.0,       # 곡선 바깥 목표 비율: 뒤차축이 곡선 안쪽을 파고드는 만큼(√(R²+L²)-R) 앞바퀴 축을 바깥에 둠
++    'offset_span': 3.0,    # k_offset에 쓰는 곡률을 앞바퀴 축 앞뒤 이 길이(m)로 평균 (S자 전환에서 목표가 계단처럼 바뀌지 않게)
+     'k_understeer': 0.0,   # 언더스티어 피드포워드 (rad per m/s²): 바퀴각 += k × 속력² × 경로 곡률(앞바퀴 축)
+     'k_slope': 0.0,        # 경사 피드포워드 비율 (0 = 끔, 1 = 추정한 경사 가속도를 그대로 보상)
+     'slope_tau': 0.3,      # 경사 추정 저역 통과 시간 상수 (s)
+@@ -50,6 +52,10 @@
+     'plan_timeout': 0.5,   # 경로·계획 속도 제한이 끊기면 제동 (s)
+     'odom_timeout': 0.35,
+     'clock_tolerance': 0.05,
++    # 출발 보조: 출발(cp0) 직후 위치·경로·계획이 아직 준비되지 않았으면 route.csv 첫 직선(-3 → 55 m, 방향 0)을
++    # 조향 0으로 곧게 달림. 바퀴 거리 launch_max_dist(m)·속력 launch_max_speed(m/s)까지, 준비되면 바로 정상 제어로
++    'launch_max_dist': 8.0,    # 장애물 1개 구간(x ≥ 15 m)보다 충분히 앞에서 멈출 수 있게
++    'launch_max_speed': 5.0,
+ }
+ WHEELBASE = 3.0        # 축간 거리 (m)
+ MAX_STEER = math.radians(35.4)   # steer = 1 일 때 앞바퀴 각도
+@@ -63,6 +69,11 @@
+         for name, default in PARAMS.items():           # self.target_speed, self.k_stanley, ... 로 씁니다
+             self.declare_parameter(name, default)
+             setattr(self, name, float(self.get_parameter(name).value))
++        self.declare_parameter('launch_assist', True)
++        self.launch_assist = bool(self.get_parameter('launch_assist').value)
++        self.assist = False              # 지금 출발 보조를 쓸 수 있는지 (cp0 출발 뒤 정상 제어가 시작되기 전까지)
++        self.assist_dist = 0.0           # 출발 보조로 달린 바퀴 거리 (m)
++        self.wheel_speed, self.wheel_stamp = 0.0, None
+         self.declare_parameter('require_plan_speed', True)
+         self.require_plan_speed = bool(self.get_parameter('require_plan_speed').value)
+         if (not all(math.isfinite(v) for v in (self.plan_timeout, self.odom_timeout, self.clock_tolerance))
+@@ -82,6 +93,7 @@
+         self.create_subscription(Float32, '/hk/plan/speed_limit', self.on_speed_limit, 1)
+         self.imu_ax = None
+         self.create_subscription(Imu, '/hk/sensors/imu/data', self.on_imu, qos_profile_sensor_data)
++        self.create_subscription(TwistStamped, '/hk/sensors/wheel_encoder/speed', self.on_wheel, qos_profile_sensor_data)
+         SimEvents(self, self.on_reset, self.on_end)
+         self.create_timer(self.dt, self.tick)
+ 
+@@ -92,6 +104,8 @@
+         self.path_stamp = self.plan_speed_limit = self.speed_limit_stamp = None
+         self.reset_time = self.now()
+         self.active = True
++        self.assist = self.launch_assist and reload and checkpoint == 0    # 출발(START, cp0)일 때만
++        self.assist_dist = 0.0
+ 
+     def on_end(self):
+         self.active = False
+@@ -132,6 +146,14 @@
+         if not all(math.isfinite(value) for pose in self.path for value in pose):
+             self.path = None
+ 
++    def on_wheel(self, m):
++        """바퀴 속력 (출발 보조 거리 적분용)."""
++        t = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
++        v = m.twist.linear.x
++        if self.assist and self.wheel_stamp is not None and 0.0 < t - self.wheel_stamp < 0.5:
++            self.assist_dist += abs(v) * (t - self.wheel_stamp)
++        self.wheel_speed, self.wheel_stamp = v, t
++
+     def on_imu(self, m):
+         ax = m.linear_acceleration.x
+         self.imu_ax = ax if math.isfinite(ax) else None
+@@ -189,9 +211,28 @@
+     def tick(self):
+         if not self.active:
+             return
+-        if self.odom is None or self.path is None or self.now() - self.reset_time < SETTLE_S:
+-            self.send(0.0, 1.0, 0.0)                 # 시작·복귀 직후, 위치·경로가 아직 없으면 정지
++        if self.now() - self.reset_time < SETTLE_S:
++            self.send(0.0, 1.0, 0.0)                 # 시작·복귀 직후는 정지 (시뮬레이터가 명령을 무시하는 시간)
++            return
++        if not self.ready():
++            self.reset_control()
++            self.send(*self.launch_command())        # 위치·경로·계획이 아직 없으면 출발 보조 또는 정지
+             return
++        self.assist = False                          # 정상 제어가 한 번 시작되면 출발 보조는 끝
++        self.send(*self.drive())
++
++    def launch_command(self):
++        """출발 보조 명령 (accel, brake, steer). 쓸 수 없거나 거리 한계를 넘으면 제동."""
++        if not self.assist or self.assist_dist >= self.launch_max_dist:
++            return 0.0, 1.0, 0.0
++        if self.wheel_speed >= self.launch_max_speed:
++            return 0.0, 0.0, 0.0
++        return 1.0, 0.0, 0.0
++
++    def ready(self):
++        """위치(odom)·경로·계획 속도가 모두 새롭고 경로가 비지 않았는지. 아니면 제동(또는 출발 보조)."""
++        if self.odom is None or self.path is None:
++            return False
+         now = self.now()
+         odom_stamp = self.odom.header.stamp.sec + self.odom.header.stamp.nanosec * 1e-9
+         stale_speed = self.require_plan_speed and (
+@@ -199,10 +240,11 @@
+         if (not -self.clock_tolerance - 1e-6 <= now - odom_stamp <= self.odom_timeout or self.path_stamp is None
+                 or not -self.clock_tolerance - 1e-6 <= now - self.path_stamp <= self.plan_timeout
+                 or self.path_stamp < self.reset_time or odom_stamp < self.reset_time or stale_speed):
+-            self.reset_control()
+-            self.send(0.0, 1.0, 0.0)
+-            return
+-        self.send(*self.drive())
++            return False
++        if not self.path or (self.require_plan_speed and (self.plan_speed_limit is None or self.plan_speed_limit <= 0)):
++            return False
++        self.odom_age = min(max(now - odom_stamp, 0.0), 0.25)
++        return True
+ 
+     def drive(self):
+         if not self.path or (self.require_plan_speed and (self.plan_speed_limit is None or self.plan_speed_limit <= 0)):
+@@ -214,6 +256,13 @@
+         yaw_rate = self.speed * math.tan(self.last_steer * MAX_STEER) / WHEELBASE
+         x, y, yaw = self.x, self.y, self.yaw
+         history = list(self.steer_history) or [self.last_steer]
++        # odom이 늦게 왔으면(위치 추정 노드 부하) 그 시간만큼 먼저 지금 바퀴에 닿아 있는 조향으로 앞당김
++        age = getattr(self, 'odom_age', 0.0)
++        if age > 0.0:
++            rate = self.speed * math.tan(history[0] * MAX_STEER) / WHEELBASE
++            x += self.speed * math.cos(yaw + 0.5 * rate * age) * age
++            y += self.speed * math.sin(yaw + 0.5 * rate * age) * age
++            yaw += rate * age
+         dt = self.latency_s / len(history)
+         for past in history:
+             x += self.speed * math.cos(yaw) * dt
+@@ -235,8 +284,9 @@
+         # 앞바퀴 축 목표를 그 k_offset 배만큼 곡선 바깥으로 옮깁니다 (+ 왼쪽 곡선이면 오른쪽으로).
+         # 곡률은 앞바퀴 축 위치에서 읽음: S자에서 뒤차축 곡률을 쓰면 새 곡선 입구에서 오히려 안쪽으로 밀림
+         front_kappa = self.path_curvature(k, span=3.0) if (self.k_offset or self.k_understeer) else 0.0
+-        if abs(front_kappa) > 1e-4:
+-            cross_error -= self.k_offset * (math.sqrt(1.0 + (WHEELBASE * front_kappa)**2) - 1.0) / front_kappa
++        offset_kappa = self.path_curvature(k, span=self.offset_span) if self.k_offset else 0.0
++        if abs(offset_kappa) > 1e-4:
++            cross_error -= self.k_offset * (math.sqrt(1.0 + (WHEELBASE * offset_kappa)**2) - 1.0) / offset_kappa
+         wheel_angle = heading_error + math.atan2(self.k_stanley * cross_error, self.k_soft + self.speed)
+         wheel_angle += self.k_curvature * math.atan(WHEELBASE * kappa)
+         # 언더스티어: 횡가속도 a = v²κ 가 클수록 운동학 각(L·κ)보다 더 꺾어야 같은 곡선을 돔
+diff -ruN -x __pycache__ -x '*.pyc' src/hk_mit/hk_mit/course.py agents/speed/src/hk_mit/hk_mit/course.py
+--- src/hk_mit/hk_mit/course.py	2026-11-13 16:56:04.604115500 +0000
++++ agents/speed/src/hk_mit/hk_mit/course.py	2026-11-13 17:24:39.129067300 +0000
+@@ -19,6 +19,19 @@
+     node.declare_parameter('course_json', '')
+ 
+ 
++def files_signature(node, *extra):
++    """경로·코스 파일 경로와 수정 시각 (+ extra). 시작(START)마다 파일을 다시 읽어 경로·속도 프로파일을 새로 만들면
++    planner가 0.3~1 s 멈춰 출발이 0.5~2 s 늦어지므로, 이 값이 같으면 지난번 것을 그대로 씁니다."""
++    sig = list(extra)
++    for name, default in (('route_csv', 'route.csv'), ('course_json', 'course.json')):
++        path = node.get_parameter(name).value or str(COURSE_DIR / default)
++        try:
++            sig.append((path, Path(path).stat().st_mtime_ns))
++        except OSError:
++            sig.append((path, None))
++    return tuple(sig)
++
++
+ def load_course(node):
+     return Course(node.get_parameter('course_json').value or str(COURSE_DIR / 'course.json'))
+ 
+diff -ruN -x __pycache__ -x '*.pyc' src/hk_mit/hk_mit/localization.py agents/speed/src/hk_mit/hk_mit/localization.py
+--- src/hk_mit/hk_mit/localization.py	2026-11-13 16:56:04.627074400 +0000
++++ agents/speed/src/hk_mit/hk_mit/localization.py	2026-11-13 18:03:04.820473500 +0000
+@@ -11,24 +11,34 @@
+           크게(gnss_reset_m) 어긋난 값이 gnss_reset_count번 이어지면 GNSS로 다시 맞춤.
+   시작·복귀: 자세는 코스 파일 값(정확)으로 두고 공분산을 작게 → 정지 중 GNSS로는 다중경로 바이어스를 배움.
+           복귀 때 bg, mx, my는 이어 감(시작이면 처음부터). 음영 구간은 바이어스를 뺀 추측 항법으로 지남.
++  벽    : LiDAR 스캔의 통로 벽 점으로 횡위치·방향을 잼 (wall_match.py). 스캔 시각의 자세(최근 자세 기록에서 보간)로
++          점을 지도에 올려 보정 δ를 구하고, 관측되는 방향만 EKF 측정으로 넣음. NIS가 크면 버리고, 연속으로
++          wall_reject_reset번 버리면 위치·방향 공분산을 키워 다시 받아들임(추정이 크게 어긋난 채 굳는 것 방지).
++          GNSS 음영 S자에서 위치 오차 0.6~1.1 m(다중경로 바이어스·방향 표류)가 감점 원인이라 넣음.
+   내보냄: 마지막 IMU 시각 뒤 지금까지를 속력·각속도로 짧게(최대 extrapolate_max) 외삽해서 냄.
+   속력  : 바퀴 속도 센서(/hk/sensors/wheel_encoder/speed) 값을 그대로 씁니다.
+ """
++from collections import deque
++import json
+ import math
++import threading
+ 
+ import numpy as np
+ import rclpy
++from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
++from rclpy.executors import MultiThreadedExecutor
+ from rclpy.node import Node
+ from rclpy.qos import qos_profile_sensor_data
+ 
+ from geometry_msgs.msg import TransformStamped, TwistStamped
+ from nav_msgs.msg import Odometry
+-from sensor_msgs.msg import Imu, NavSatFix
++from sensor_msgs.msg import Imu, LaserScan, NavSatFix
+ from tf2_ros import TransformBroadcaster
+ 
+-from .course import declare_file_params, load_course
++from .course import COURSE_DIR, declare_file_params, files_signature, load_course, load_route
+ from .sim_events import SimEvents
+ from .utm import ll_to_map
++from .wall_match import corridor_map, scan_points, wall_measurement
+ 
+ RATE_HZ = 50.0
+ X, Y, YAW, BG, MX, MY, KS = range(7)  # EKF 상태 순서 (KS: 바퀴 속력 배율 오차, 진짜 속력 = 바퀴 × (1 - KS - 슬립))
+@@ -55,9 +65,30 @@
+     'lateral_slip': 0.006,            # 곡선에서 후륜 차축이 바깥으로 미끄러지는 속도 = 이 값 × v² × 각속도 (s/m... 실측 맞춤)
+     'yaw_model_sigma': 0.002,         # 방향 모델 오차 (rad/√s)
+     'extrapolate_max': 0.1,           # 내보낼 때 외삽하는 최대 시간 (s)
++    # LiDAR 벽 측정 (wall_match.py)
++    'corridor_width': 0.0,            # 통로 폭 (m). 0이면 시도 코스 파일(attempt_course_json)의 corridor_width_m, 없으면 4.392
++    'wall_sigma_pt': 0.05,            # 벽 점 하나의 잔차 σ (m, LiDAR σ 0.03 + 모형 오차)
++    'wall_inflation': 4.0,            # 점들 사이 상관을 고려해 측정 공분산에 곱하는 값
++    'wall_ahead': 25.0,               # 차 앞 이 거리(m)까지의 벽 점을 씀
++    'wall_behind': 5.0,               # 차 뒤 이 거리(m)까지
++    'wall_gate_fine': 0.2,            # 최빈값 ± 이 값 안의 점만 맞춤 (m)
++    'wall_stride': 2.0,               # 빔 솎기 (720 → 360)
++    'wall_min_pts': 15.0,             # 맞춘 점이 이보다 적으면 측정 없음
++    'wall_zone_margin': 18.0,         # 장애물·주차·회전교차로 구간 앞뒤 이 거리(m)까지 벽을 쓰지 않음 (폭이 바뀌는 곳이 15 m까지)
++    'wall_nis_gate': 16.0,            # 측정 NIS가 이보다 크면 버림 (χ² 3자유도 99.9 %)
++    'wall_reject_reset': 10.0,        # 연속으로 이만큼 버리면 (양쪽 벽이 보이고 잔차가 작을 때만) 공분산을 키워 받아들임
++    'wall_reset_rms': 0.06,           # 그때 허용하는 벽 점 잔차 RMS (m)
+ }
+ 
+ 
++def locked(f):
++    """상태 잠금 안에서 부르는 콜백 (벽 측정 스레드와 함께 돌기 때문)."""
++    def wrapper(self, *args):
++        with self.lock:
++            return f(self, *args)
++    return wrapper
++
++
+ def stamp(m):
+     """메시지의 측정 시각 (s)."""
+     return m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+@@ -79,22 +110,37 @@
+         self.P = np.zeros((N, N))        # EKF 공분산
+         self.ready = False
+         self.started = False             # 시작(START)을 한 번이라도 받았는지 (복귀 때 바이어스를 이어 갈지)
++        self.declare_parameter('wall_enabled', True)
++        self.wall_enabled = bool(self.get_parameter('wall_enabled').value)
++        self.declare_parameter('attempt_course_json', '/data/current/course.json')
++        self.cmap = None                 # 벽 지도 (wall_match.CorridorMap)
++        self.cmap_files = None           # 벽 지도를 만든 파일·통로 폭 (같으면 시작 때 다시 만들지 않음)
++        self.lock = threading.RLock()    # 상태(s, P) 잠금: 벽 측정은 별도 스레드에서 계산
++        self.epoch = 0                   # 시작·복귀마다 1씩 (계산 중이던 벽 측정을 버리려고)
++        self.wall_stats = [0, 0, 0.0]    # 받아들인 수, 버린 수, 받아들인 횡 보정 제곱합
+         self.reset(None)
+ 
+         self.create_subscription(NavSatFix, '/hk/sensors/gps/fix', self.on_gps, qos_profile_sensor_data)
+         self.create_subscription(Imu, '/hk/sensors/imu/data', self.on_imu, qos_profile_sensor_data)
+         self.create_subscription(TwistStamped, '/hk/sensors/wheel_encoder/speed', self.on_wheel, qos_profile_sensor_data)
++        self.create_subscription(LaserScan, '/hk/sensors/lidar/scan', self.on_scan, qos_profile_sensor_data,
++                                 callback_group=MutuallyExclusiveCallbackGroup())
+         self.pub = self.create_publisher(Odometry, '/hk/local/odom', 10)
+         self.tf = TransformBroadcaster(self)
+         SimEvents(self, self.on_reset, self.on_end)
+         self.create_timer(1.0 / RATE_HZ, self.publish)
+ 
+     # ---- 시작·복귀 -----------------------------------------------------------------------------------
++    @locked
+     def on_reset(self, checkpoint, reload):
+         if reload or self.course is None:
+             self.course = load_course(self)
++            if self.wall_enabled:
++                self.load_corridor()
+         self.reset(self.course.pose(checkpoint), keep_bias=not reload)
++        self.publish()                   # 다음 타이머(20 ms)를 기다리지 않고 바로 새 자세·TF를 냄 (planner·인지 준비)
+ 
++    @locked
+     def on_end(self):
+         self.ready = False
+ 
+@@ -102,6 +148,7 @@
+         """(x, y, yaw) 자세에서 처음부터. pose가 None이면 자세를 모르는 상태(내보내지 않음).
+         keep_bias(복귀)면 자이로·GNSS 바이어스 추정과 그 불확실성을 이어 가고, 시작이면 바이어스도 처음부터."""
+         x, y, yaw = pose if pose else (0.0, 0.0, 0.0)
++        self.epoch += 1
+         bias, bias_P = self.s[BG:].copy(), self.P[BG:, BG:].copy()
+         self.s = np.array([x, y, yaw] + [0.0] * (N - 3))
+         self.P = np.zeros((N, N))
+@@ -121,21 +168,28 @@
+         self.w = 0.0                     # 바이어스를 뺀 마지막 각속도 (외삽용)
+         self.yaw_time = None             # 마지막으로 적분한 IMU 측정 시각 (s)
+         self.bad_gnss = 0                # 이어서 크게 어긋난 GNSS 수
++        self.history = deque(maxlen=100) # 최근 자세 (IMU 시각, x, y, yaw): 스캔 시각 자세 보간용
++        self.wall_hint = None            # 지난 벽 측정의 경로 점 번호
++        self.wall_rejects = 0            # 이어서 버린 벽 측정 수
+ 
+     # ---- 센서마다 불림 ----------------------------------------------------------------------------
+     def on_wheel(self, m):
+         """바퀴 속도 (부호 있는 m/s, 슬립 포함)."""
+         self.speed = m.twist.linear.x
+ 
++    @locked
+     def on_imu(self, m):
+         if not self.ready:
+             return
+         t = stamp(m)
+-        if self.yaw_time is not None and 0.0 < t - self.yaw_time <= 1.5:   # IMU 주기 최대 1초
++        if self.yaw_time is not None and t <= self.yaw_time:   # 늦게 온(순서가 바뀐) IMU는 버림 (시각을 되돌리면 다음에 두 번 적분)
++            return
++        if self.yaw_time is not None and t - self.yaw_time <= 1.5:   # IMU 주기 최대 1초
+             dt = t - self.yaw_time
+             self.ax += min(dt / self.accel_filter_tau, 1.0) * (m.linear_acceleration.x - self.ax)
+             self.predict(dt, m.angular_velocity.z)
+         self.yaw_time = t
++        self.history.append((t, self.s[X], self.s[Y], self.s[YAW]))
+ 
+     def predict(self, dt, gz):
+         """추측 항법: GNSS 사이(20 Hz)와 음영 구간을 바퀴 속력·방향으로 이어 갑니다."""
+@@ -181,6 +235,7 @@
+         I_KH = np.eye(N) - K @ H
+         self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
+ 
++    @locked
+     def on_gps(self, m):
+         """GNSS. 음영 구간에서는 오지 않습니다."""
+         if not self.ready:
+@@ -209,7 +264,95 @@
+         self.bad_gnss = 0
+         self.update(innov, H, R)
+ 
++    # ---- LiDAR 벽 ------------------------------------------------------------------------------------
++    def load_corridor(self):
++        width = self.corridor_width
++        if width <= 0:
++            width = 4.392
++            try:
++                with open(self.get_parameter('attempt_course_json').value, encoding='utf-8') as f:
++                    width = float(json.load(f).get('corridor_width_m', width))
++            except (OSError, ValueError, TypeError):
++                pass
++        signature = files_signature(self, width)
++        if signature == self.cmap_files:
++            return
++        path = self.get_parameter('course_json').value or str(COURSE_DIR / 'course.json')
++        self.cmap = corridor_map(load_route(self).points, path, width, self.wall_zone_margin)
++        self.cmap_files = signature
++        used = np.isfinite(self.cmap.wL) | np.isfinite(self.cmap.wR)
++        self.get_logger().info(f'벽 지도: 통로 폭 {width:.3f} m, 벽을 쓰는 경로 {np.count_nonzero(used) * 0.5:.0f} m')
++
++    def pose_at(self, t):
++        """t 시각의 추정 자세. 최근 기록에서 보간하고, 마지막 기록보다 뒤면 속력·각속도로 짧게 외삽."""
++        h = self.history
++        if not h or t >= h[-1][0]:
++            dt = 0.0 if not h else min(t - h[-1][0], 0.2)
++            yaw = self.s[YAW]
++            return (self.s[X] + self.v * math.cos(yaw) * dt, self.s[Y] + self.v * math.sin(yaw) * dt, yaw + self.w * dt)
++        if t < h[0][0]:
++            return None
++        for k in range(len(h) - 1, 0, -1):
++            if h[k - 1][0] <= t:
++                (t0, x0, y0, a0), (t1, x1, y1, a1) = h[k - 1], h[k]
++                f = (t - t0) / max(t1 - t0, 1e-9)
++                return (x0 + f * (x1 - x0), y0 + f * (y1 - y0), a0 + f * wrap(a1 - a0))
++        return None
++
++    def on_scan(self, m):
++        """LiDAR 벽 측정. 스캔 시각 자세 기준 보정 δ를 지금 상태에 그대로 적용 (그 사이 이동은 짧아 같은 보정으로 봄).
++        계산(수 ms~수십 ms)은 잠금 밖에서 하고(별도 스레드), 상태 갱신만 잠금 안에서 함 → IMU 적분·내보내기가 멈추지 않음
++        (한 스레드로 돌리면 부하가 클 때 odom이 0.1~0.16 s 끊겨 S자에서 1 m 넘게 늦은 위치를 냄, sp_w3_s2)."""
++        with self.lock:
++            if not self.ready or self.cmap is None:
++                return
++            pose = self.pose_at(stamp(m))
++            if pose is None:
++                return
++            cmap, hint, P_xy = self.cmap, self.wall_hint, self.P[:2, :2].copy()
++            epoch = self.epoch
++        q = scan_points(m.ranges, m.angle_min, m.angle_increment, max(m.range_min, 0.5),
++                        self.wall_ahead + 5.0, max(1, int(self.wall_stride)))
++        i = cmap.nearest_index(pose[0], pose[1], hint)
++        n = cmap.n[i]
++        lat_sigma = math.sqrt(max(float(n @ P_xy @ n), 0.0))
++        meas = wall_measurement(cmap, q, pose, lat_sigma, i, behind=self.wall_behind, ahead=self.wall_ahead,
++                                gate_fine=self.wall_gate_fine, sigma_pt=self.wall_sigma_pt,
++                                inflation=self.wall_inflation, min_pts=int(self.wall_min_pts))
++        with self.lock:
++            if epoch != self.epoch:                  # 계산하는 사이 시작·복귀가 있었으면 버림
++                return
++            self.wall_hint = i
++            if meas is not None:
++                self.apply_wall(meas)
++
++    def apply_wall(self, meas):
++        H = np.zeros((len(meas['z']), N))
++        H[:, :3] = meas['H']
++        z, R = meas['z'], meas['R']
++        nis = float(z @ np.linalg.solve(H @ self.P @ H.T + R, z))
++        if nis > self.wall_nis_gate:
++            self.wall_rejects += 1
++            self.wall_stats[1] += 1
++            clean = meas['dwidth'] is not None and abs(meas['dwidth']) < 0.1 and meas['rms'] < self.wall_reset_rms
++            if self.wall_rejects < self.wall_reject_reset or not clean:
++                return
++            # 계속 어긋남: 추정이 틀렸다고 보고 위치·방향 불확실성을 키워 받아들임
++            self.get_logger().warn(f'벽 측정 연속 거부 {self.wall_rejects}회 (횡 {meas["lat"]:+.2f} m): 공분산을 키워 반영')
++            self.P[X, X] += 0.5 ** 2
++            self.P[Y, Y] += 0.5 ** 2
++            self.P[YAW, YAW] += 0.03 ** 2
++        self.wall_rejects = 0
++        self.wall_stats[0] += 1
++        self.wall_stats[2] += meas['lat'] ** 2
++        self.update(z, H, R)
++        accepted, rejected, sq = self.wall_stats
++        if accepted % 100 == 0:
++            self.get_logger().info(f'벽 측정 {accepted}회 반영 / {rejected}회 거부, 횡 보정 RMS '
++                                   f'{math.sqrt(sq / accepted):.3f} m')
++
+     # ---- 50 Hz로 내보냄 ----------------------------------------------------------------------------
++    @locked
+     def publish(self):
+         if not self.ready:
+             return
+@@ -241,8 +384,10 @@
+ def main(args=None):
+     rclpy.init(args=args)
+     node = Localization()
++    if node.wall_enabled:
++        node.load_corridor()             # 켤 때 미리 만듦
+     try:
+-        rclpy.spin(node)
++        rclpy.spin(node, executor=MultiThreadedExecutor(num_threads=2))
+     except KeyboardInterrupt:
+         pass
+     node.destroy_node()
+diff -ruN -x __pycache__ -x '*.pyc' src/hk_mit/hk_mit/planner.py agents/speed/src/hk_mit/hk_mit/planner.py
+--- src/hk_mit/hk_mit/planner.py	2026-11-13 16:56:04.642025900 +0000
++++ agents/speed/src/hk_mit/hk_mit/planner.py	2026-11-13 18:03:05.029822000 +0000
+@@ -31,7 +31,7 @@
+ from visualization_msgs.msg import Marker, MarkerArray
+ 
+ from .avoidance import AvoidanceConfig, Ego, ReferencePath, footprint_corners, plan_avoidance, speed_profile
+-from .course import COURSE_DIR, declare_file_params, load_route, Route
++from .course import COURSE_DIR, declare_file_params, files_signature, load_route, Route
+ from .roundabout import NpcTracker, follow_speed, merge_conflicts, ring_reference, stop_point, travel_time, wrap
+ from .sim_events import SimEvents
+ 
+@@ -131,6 +131,7 @@
+                 or self.obstacle_timeout <= 0 or self.odom_timeout <= 0 or self.clock_tolerance < 0):
+             raise ValueError('Sensor timeouts must be positive')
+         self.route = Route()
++        self.files_loaded = None         # 지금 경로·프로파일을 만든 파일 (course.files_signature)
+         self.reference = None
+         self.previous = None
+         self.obstacles = None
+@@ -151,11 +152,20 @@
+     def now(self):
+         return self.get_clock().now().nanoseconds * 1e-9
+ 
++    def preload(self):
++        """켤 때 경로·회전교차로·속도 프로파일을 미리 만듦 (시작 때 다시 만들지 않게)."""
++        self.route = load_route(self)
++        self.setup_roundabout()
++        self.build_profile()
++        self.files_loaded = files_signature(self)
++
+     def on_reset(self, checkpoint, reload):
+-        if reload or not self.route.points:
++        signature = files_signature(self)
++        if not self.route.points or (reload and signature != self.files_loaded):
+             self.route = load_route(self)
+             self.setup_roundabout()
+             self.build_profile()
++            self.files_loaded = signature
+         if reload or self.avoidance_ranges is None:
+             self.avoidance_ranges = self.load_avoidance_ranges()
+             self.get_logger().info(f'전역 경로 {len(self.route.points)}점, 속도 프로파일 '
+@@ -554,6 +564,7 @@
+ def main(args=None):
+     rclpy.init(args=args)
+     node = Planner()
++    node.preload()
+     try:
+         rclpy.spin(node)
+     except (KeyboardInterrupt, ExternalShutdownException):
+diff -ruN -x __pycache__ -x '*.pyc' src/hk_mit/hk_mit/wall_match.py agents/speed/src/hk_mit/hk_mit/wall_match.py
+--- src/hk_mit/hk_mit/wall_match.py	1970-01-01 00:00:00.000000000 +0000
++++ agents/speed/src/hk_mit/hk_mit/wall_match.py	2026-11-13 18:03:05.160516300 +0000
+@@ -0,0 +1,219 @@
++"""LiDAR 통로 벽으로 횡위치·방향을 재는 의사측정 (localization.py EKF에 넣음).
++
++research/localization/wall_lateral_update.py 스케치를 옮겨 실측에 맞춘 것입니다.
++  * 지도: route.csv 중심선 ± 반폭(= corridor_width / 2). 실측(LiDAR + ground truth, 소음 켬)으로 확인한 벽 위치는
++    통로 구간에서 경로 ±2.20 m (점 10~90 % 범위 ±0.03 m = LiDAR 잡음)입니다. 장애물 구간(±3.75), 주차 구간·회전교차로
++    (±3.0, 한쪽 열림)와 그 앞뒤 폭이 바뀌는 곳(약 8 m)은 모형이 맞지 않아 벽을 쓰지 않습니다(미션 구간 ± wall_zone_margin).
++  * 스캔 점을 스캔 시각의 추정 자세로 지도에 올려 중심선에 투영(d = 왼쪽 + 횡거리) → 왼쪽 벽 점은 d ≈ +w, 오른쪽 벽은
++    d ≈ -w. 잔차를 자세 보정 (δx, δy, δyaw)로 설명하는 가중 최소제곱(측별 최빈값 → 좁은 게이트 → Huber IRLS).
++  * 직선에서는 진행 방향 위치가 관측되지 않으므로 정보행렬 고유분해로 관측되는 방향만 측정으로 냅니다.
++  * 출력 (z, H, R): 상태 [x, y, yaw]에 대한 혁신 z = H δ, 측정 공분산 R.
++의존성: numpy만 (ROS 없이 시험 가능).
++"""
++import json
++import math
++
++import numpy as np
++
++LIDAR_X = 1.15          # 뒤차축 기준 LiDAR 위치 (config/sensor_mounts.yaml)
++NO_WALL_TYPES = ('obstacle1', 'obstacle3', 'parallel_parking', 'rear_parking')
++
++
++class CorridorMap:
++    """route 중심선(0.5 m 간격)과 측별 기대 벽 반폭. nan이면 그쪽 벽을 쓰지 않음."""
++
++    def __init__(self, route_xy, half_width=2.196, kappa_w_max=0.6):
++        p = np.asarray(route_xy, float)
++        self.p = p
++        seg = np.diff(p, axis=0)
++        self.s = np.r_[0.0, np.cumsum(np.hypot(seg[:, 0], seg[:, 1]))]
++        t = np.vstack([seg[:1], seg[:-1] + seg[1:], seg[-1:]])       # 꼭짓점 접선: 앞뒤 선분 평균
++        t /= np.hypot(t[:, 0], t[:, 1])[:, None]
++        self.t = t
++        self.n = np.c_[-t[:, 1], t[:, 0]]                              # 왼쪽 법선
++        heading = np.unwrap(np.arctan2(t[:, 1], t[:, 0]))
++        self.kappa = np.gradient(heading, self.s)
++        self.wL = np.full(len(p), float(half_width))
++        self.wR = np.full(len(p), float(half_width))
++        # 안쪽 벽 반경(R - w)이 작아 투영이 모호한 곳(회전교차로 진입·진출 꺾임)은 그쪽 벽을 끔
++        k = self.kappa
++        self.wL[k * half_width > kappa_w_max] = np.nan
++        self.wR[-k * half_width > kappa_w_max] = np.nan
++
++    def disable(self, s0, s1):
++        """경로 거리 s0~s1 구간의 벽을 끔."""
++        off = (self.s >= s0) & (self.s <= s1)
++        self.wL[off] = np.nan
++        self.wR[off] = np.nan
++
++    def nearest_index(self, x, y, hint=None, window=200):
++        i0, i1 = (0, len(self.p)) if hint is None else (max(0, hint - window), min(len(self.p), hint + window))
++        d2 = (self.p[i0:i1, 0] - x) ** 2 + (self.p[i0:i1, 1] - y) ** 2
++        return i0 + int(np.argmin(d2))
++
++    def station_range(self, polygon_or_center, radius=None, pad=3.0):
++        """미션 구간(다각형의 외접 사각형을 pad만큼 넓힘) 또는 원(중심, 반지름) 안에 드는 경로 거리 (최소, 최대).
++        주차 구간은 도로 옆에 있어 경로가 구간 밖 2.5 m를 지나므로 pad가 필요. 없으면 None."""
++        if radius is None:
++            zone = np.asarray(polygon_or_center, float)
++            lo, hi = zone.min(axis=0) - pad, zone.max(axis=0) + pad
++            inside = np.all((self.p >= lo) & (self.p <= hi), axis=1)
++        else:
++            inside = np.hypot(*(self.p - np.asarray(polygon_or_center, float)).T) < radius
++        return (float(self.s[inside].min()), float(self.s[inside].max())) if inside.any() else None
++
++    def project(self, pts, i0, i1, j_prev=None):
++        """pts (P,2)를 꼭짓점 i0..i1-1 폴리라인에 투영 → s, d(왼쪽 +), 법선 (P,2), 가장 가까운 꼭짓점 번호."""
++        px, py = pts[:, 0], pts[:, 1]
++        if j_prev is None:
++            P = self.p[i0:i1]
++            d2 = (px[:, None] - P[None, :, 0]) ** 2 + (py[:, None] - P[None, :, 1]) ** 2
++            j = i0 + np.argmin(d2, axis=1)
++        else:                                       # 반복 중에는 보정이 작으므로 이전 꼭짓점 ±2만 봄
++            cand = np.clip(j_prev[:, None] + np.arange(-2, 3)[None, :], 0, len(self.p) - 1)
++            d2 = (px[:, None] - self.p[cand, 0]) ** 2 + (py[:, None] - self.p[cand, 1]) ** 2
++            j = cand[np.arange(len(pts)), np.argmin(d2, axis=1)]
++        best = np.full(len(pts), np.inf)
++        out_s, out_d, out_n = np.zeros(len(pts)), np.zeros(len(pts)), np.zeros((len(pts), 2))
++        for off in (-1, 0):                        # (j-1, j), (j, j+1) 두 선분 중 가까운 쪽
++            a = np.clip(j + off, 0, len(self.p) - 2)
++            A, ab = self.p[a], self.p[a + 1] - self.p[a]
++            L2 = (ab ** 2).sum(1)
++            u = np.clip(((pts - A) * ab).sum(1) / L2, 0.0, 1.0)
++            foot = A + u[:, None] * ab
++            dist = np.hypot(*(pts - foot).T)
++            tv = ab / np.sqrt(L2)[:, None]
++            nv = np.stack((-tv[:, 1], tv[:, 0]), axis=1)
++            better = dist < best
++            best = np.where(better, dist, best)
++            out_s = np.where(better, self.s[a] + u * np.sqrt(L2), out_s)
++            out_d = np.where(better, ((pts - foot) * nv).sum(1), out_d)
++            out_n = np.where(better[:, None], nv, out_n)
++        return out_s, out_d, out_n, j
++
++
++def corridor_map(route_xy, course_json=None, corridor_width=4.392, margin=18.0):
++    """경로 + 코스 파일 미션으로 지도를 만듦. 장애물·주차 구간과 회전교차로(링 반지름 + 12 m 원)는 앞뒤 margin(m)까지 벽 끔
++    (실측: 폭이 바뀌는 구간이 미션 구간 바깥 8~15 m까지 이어짐)."""
++    cmap = CorridorMap(route_xy, corridor_width / 2.0)
++    if course_json:
++        try:
++            with open(course_json, encoding='utf-8') as f:
++                missions = json.load(f)['course'].get('missions', [])
++        except (OSError, ValueError, KeyError):
++            missions = []
++        for m in missions:
++            rng = None
++            if m.get('type') in NO_WALL_TYPES and m.get('zone'):
++                rng = cmap.station_range(m['zone'])
++            elif m.get('type') == 'roundabout' and m.get('center'):
++                rng = cmap.station_range(m['center'], float(m.get('npc_radius', 11.0)) + 12.0)
++            if rng:
++                cmap.disable(rng[0] - margin, rng[1] + margin)
++    return cmap
++
++
++def scan_points(ranges, angle_min, angle_increment, range_min=0.5, max_range=30.0, stride=2):
++    """LaserScan 거리 → 뒤차축 좌표 점 (P,2). 시뮬레이터 스캔은 한 순간 값(time_increment 0)이라 역왜곡은 하지 않음."""
++    r = np.asarray(ranges, float)
++    a = angle_min + angle_increment * np.arange(len(r))
++    r, a = r[::stride], a[::stride]
++    ok = np.isfinite(r) & (r >= range_min) & (r <= max_range)
++    r, a = r[ok], a[ok]
++    return np.stack((LIDAR_X + r * np.cos(a), r * np.sin(a)), axis=1)
++
++
++def wall_measurement(cmap, q_base, pose, lat_sigma_prior=0.5, hint=None, behind=5.0, ahead=25.0, gate_fine=0.20,
++                     huber=0.06, sigma_pt=0.05, inflation=4.0, min_pts=15, min_span=4.0, iters=3,
++                     floor=(0.03, 0.003), max_dwidth=0.4):
++    """q_base: 뒤차축 좌표 점, pose: 스캔 시각의 추정 (x, y, yaw). 반환 dict(z, H, R, lat, ...) 또는 None.
++
++    sigma_pt: 점 하나 잔차 σ (LiDAR 0.03 + 모형 오차), inflation: 점들 사이 상관을 고려해 R에 곱하는 값,
++    floor: R 하한 σ (횡 m, 방향 rad), max_dwidth: 양쪽 벽으로 본 반폭 오차가 이보다 크면 한쪽만 씀."""
++    x0, y0, th0 = pose
++    i_veh = cmap.nearest_index(x0, y0, hint)
++    s_veh = cmap.s[i_veh]
++    i0 = int(np.searchsorted(cmap.s, s_veh - behind - 3.0))
++    i1 = min(int(np.searchsorted(cmap.s, s_veh + ahead + 3.0)) + 1, len(cmap.p))
++    if i1 - i0 < 3:
++        return None
++    q_base = q_base[np.hypot(*q_base.T) < ahead + 5.0]
++    if len(q_base) < min_pts:
++        return None
++    delta, dw = np.zeros(3), 0.0
++    gate_coarse = min(max(3.0 * lat_sigma_prior + 0.3, 0.5), 1.6)
++    qx, qy = q_base[:, 0], q_base[:, 1]
++    j = sel = None
++    for it in range(iters + 1):
++        th = th0 + delta[2]
++        cc, ss = math.cos(th), math.sin(th)
++        t = np.array([x0 + delta[0], y0 + delta[1]])
++        pts = np.stack((t[0] + cc * qx - ss * qy, t[1] + ss * qx + cc * qy), axis=1)
++        sp, d, nrm, j = cmap.project(pts, i0, i1, j)
++        wl, wr = cmap.wL[j], cmap.wR[j]
++        in_s = (sp > s_veh - behind) & (sp < s_veh + ahead)
++        left = in_s & (d > 0) & np.isfinite(wl)
++        right = in_s & (d < 0) & np.isfinite(wr)
++        r = d - np.where(d > 0, np.nan_to_num(wl) + dw, -(np.nan_to_num(wr) + dw))
++        if it == 0:
++            # 1단계: 측별 잔차 최빈값 (0.04 m 칸) → 장애물·NPC·열린 곳 점에 강함
++            modes = {}
++            for name, m in (('L', left), ('R', right)):
++                rr = r[m & (np.abs(r) < gate_coarse)]
++                if len(rr) >= min_pts // 2:
++                    hist, edges = np.histogram(rr, bins=np.arange(-gate_coarse, gate_coarse + 0.04, 0.04))
++                    k = int(np.argmax(np.convolve(hist, [1, 2, 3, 2, 1], 'same')))
++                    mode = 0.5 * (edges[k] + edges[k + 1])
++                    near = rr[np.abs(rr - mode) < 0.1]
++                    modes[name] = float(np.median(near)) if len(near) else mode
++            if not modes:
++                return None
++            if len(modes) == 2:
++                e_lat, dw = -(modes['L'] + modes['R']) / 2, (modes['L'] - modes['R']) / 2
++                if abs(dw) > max_dwidth:            # 폭이 지도와 다름 → 점이 많은 쪽만
++                    keep = 'L' if left.sum() >= right.sum() else 'R'
++                    e_lat, dw = -modes[keep], 0.0
++            else:
++                e_lat = -next(iter(modes.values()))
++            delta[:2] = e_lat * cmap.n[i_veh]
++            continue
++        # 2단계: 좁은 게이트 + Huber IRLS (Gauss-Newton, 재투영 포함)
++        sel = (left | right) & (np.abs(r) < gate_fine)
++        nL, nR = int((sel & left).sum()), int((sel & right).sum())
++        if nL + nR < min_pts:
++            return None
++        rs, ns, rel = r[sel], nrm[sel], pts[sel] - t
++        both = nL >= min_pts // 3 and nR >= min_pts // 3
++        cols = [ns[:, 0], ns[:, 1], -ns[:, 0] * rel[:, 1] + ns[:, 1] * rel[:, 0]]
++        if both:
++            cols.append(-np.where(d[sel] > 0, 1.0, -1.0))   # ∂r/∂Δw
++        J = np.stack(cols, axis=1)
++        wts = np.where(np.abs(rs) < huber, 1.0, huber / np.maximum(np.abs(rs), 1e-9))
++        A = (J * wts[:, None]).T @ J
++        g = (J * wts[:, None]).T @ rs
++        reg = np.diag([1e-4, 1e-4, 1e-3] + ([1.0] if both else []))   # 직선 진행 방향 특이성 방지 (아주 약한 사전)
++        step = -np.linalg.solve(A + reg, g)
++        delta += step[:3]
++        if both:
++            dw += step[3]
++    rs_fin = rs + J @ step
++    sig2 = max(sigma_pt ** 2, float(np.average(rs_fin ** 2, weights=wts)))
++    info = A / sig2 / inflation
++    if both:                                       # Δw 소거 (Schur complement)
++        info = info[:3, :3] - np.outer(info[:3, 3], info[3, :3]) / (info[3, 3] + 1.0 / 0.3 ** 2)
++    span = float(np.ptp(sp[sel])) if sel.any() else 0.0
++    Ls = 5.0                                       # yaw를 5 m 길이로 정규화해 고유분해
++    S = np.diag([1.0, 1.0, Ls])
++    Sinv = np.linalg.inv(S)
++    lam, U = np.linalg.eigh(Sinv @ info @ Sinv)
++    keep = lam > 1.0 / 0.5 ** 2                    # σ < 0.5 (정규화 단위)인 방향만
++    if span < min_span:
++        keep &= np.abs(U[2, :]) < 0.5              # 진행 방향 분포가 짧으면 방향 정보는 버림
++    if not keep.any():
++        return None
++    H = U[:, keep].T @ S
++    R = np.diag(1.0 / lam[keep]) + np.eye(int(keep.sum())) * min(floor[0] ** 2, (floor[1] * Ls) ** 2)
++    n0 = cmap.n[i_veh]
++    return {'z': H @ delta, 'H': H, 'R': R, 'delta': delta, 'lat': float(n0 @ delta[:2]),
++            'dwidth': float(dw) if both else None, 'n_left': nL, 'n_right': nR, 'index': i_veh,
++            'rms': math.sqrt(sig2)}
