@@ -2,6 +2,38 @@
 
 HEVEN 2026 Docker 배포본 기반 참가자 실행 환경·스켈레톤·사용 문서.
 
+## 이 레포에서 수정할 MIT 주행 코드
+
+실제 참가자 패키지는 [`mit_ws/src/hk_mit`](mit_ws/src/hk_mit)에 있습니다.
+
+- [`localization.py`](mit_ws/src/hk_mit/hk_mit/localization.py): 위치 추정
+- [`planner.py`](mit_ws/src/hk_mit/hk_mit/planner.py): 경로 계획
+- [`control.py`](mit_ws/src/hk_mit/hk_mit/control.py): 조향·속도 제어
+- [`lidar_perception.py`](mit_ws/src/hk_mit/hk_mit/lidar_perception.py): LiDAR 입력
+- `config/`, `launch/`, `course/`, `rviz/`: 설정·실행·코스·시각화 자료
+
+기존 로컬 MIT 작업 폴더에서 소스와 패키지 자료를 가져왔으며, 빌드 결과물은 포함하지 않았습니다.
+기본 실행 스크립트는 사용자 홈의 작업 폴더를 연결합니다. 이 레포의 코드를 직접 연결하려면
+저장소 루트에서 `HEVEN_HOME`을 설정하고 컨테이너를 다시 생성합니다.
+아래 `stop` 명령은 실행 중인 시뮬레이터를 종료하므로 주행을 끝낸 뒤 실행하세요.
+
+```powershell
+# Windows PowerShell, 저장소 루트
+$env:HEVEN_HOME = (Get-Location).Path
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run.ps1 stop
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run.ps1 shell
+```
+
+컨테이너 안에서:
+
+```bash
+cd /mit_ws
+colcon build --packages-select hk_mit
+source install/setup.bash
+ros2 launch hk_mit bringup.launch.py
+```
+
 > **대회 안내(정본): [2026 성균관대 자율주행 해커톤 Notion](https://app.notion.com/p/2026-416a48b57a16808e8bc0c0f4e688aed3)** — 시간표, 실행 방법, 기본 코드, 규정이 모두 여기에 있습니다.
 
 ## 빠른 시작 (MIT 종목)

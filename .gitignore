@@ -53,3 +53,7 @@ external/
 
 # Local documentation environment
 .venv/
+
+# Container user state when HEVEN_HOME points at this repository
+/mit_ws/.home/
+/morai_ws/.home/
