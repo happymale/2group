@@ -23,8 +23,10 @@ search never crosses its end, and /hk/plan/gear (std_msgs/Int8) tells control ho
 Forward parking paths are the front-axle trace of the designed rear-axle poses (control tracks the front axle).
 """
 from collections import Counter
+from dataclasses import replace
 import json
 import math
+import time
 
 import numpy as np
 import rclpy
@@ -41,6 +43,7 @@ from std_msgs.msg import Float32, Int8, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 from .avoidance import AvoidanceConfig, Ego, ReferencePath, footprint_corners, plan_avoidance, speed_profile
+from .detour import DetourMap, plan_detour, read_obstacles, scene_signature
 from .course import COURSE_DIR, declare_file_params, files_signature, load_route, Route
 from .parking import (FORWARD, REVERSE, Maneuver, Mission, ParkingConfig, Segment, SlotFrame, detect_slot,
                       free_space_ok, parallel_exit, plan_maneuver, road_lateral, splice_route)
@@ -63,7 +66,9 @@ PARAMS = {              # config/bringup.yaml에서 바꿉니다. 아래는 기�
     'max_lateral_accel': 1.8,
     'cruise_speed': 5.0,    # 직선 최고 속력 (m/s). 곡선은 아래 속도 프로파일이 줄입니다
     'avoidance_speed': 3.0,
-    'return_time': 2.5,     # 장애물을 지난 뒤 기준 경로로 돌아오는 시간 (s)
+    'return_time': 2.5,     # 장애물을 지난 뒤 기준 경로로 돌아오는 시간 (s, avoidance_speed 기준 길이)
+    'tight_speed': 3.0,     # 여유를 줄여 찾은 경로(tight)의 속력 상한 (m/s)
+    'return_gap': 1.5,      # 마지막으로 본 장애물 점 뒤에 더 기다렸다 복귀하는 거리 (m)
     'corner_lateral_accel': 4.0,   # 기준 경로 곡선에서 허용하는 횡가속도 (m/s²)
     'profile_accel': 2.0,          # 속도 프로파일 가속 한계 (m/s²)
     'profile_decel': 3.0,          # 속도 프로파일 감속 한계 (m/s²). 곡선 앞에서 미리 줄임
@@ -183,6 +188,27 @@ class Planner(Node):
         self.npc = None
         self.reset_roundabout_state()
         self.avoidance_ranges = None     # 경로를 읽기 전(시험에서 reference를 직접 넣은 경우)은 코스 전체
+        self.obstacle_zones = {}         # 회피 구간 → 원래 장애물 미션 구간 (경로 거리)
+        self.plan_level = 0              # 직전 계획의 여유 단계 (avoidance.relaxation_levels)
+        # 전역 경로 우회(detour.py): 구간 안 LiDAR 점을 모아 장애물 좌표로 기준 경로 구간을 바꿈.
+        # 실패하면 아래 Frenet 후보 회피(plan_avoidance)를 그대로 씀
+        self.declare_parameter('detour_enabled', True)
+        self.detour_enabled = bool(self.get_parameter('detour_enabled').value)
+        # 우회 경로 속력: 지그재그 추종 지연(5 m/s에서 약 0.2 m)이 장애물 여유를 깎으므로 횡가속도를 낮게
+        self.declare_parameter('detour_lateral_accel', 2.0)
+        self.detour_lateral_accel = float(self.get_parameter('detour_lateral_accel').value)
+        self.declare_parameter('detour_slow_speed', 4.0)     # margin을 반으로 줄인 우회 경로의 속력 상한
+        # 우회 경로 최고 속력: 14 m/s로 들어오면 옆 이동이 늦고 조향 지연(0.3 s)에 추종이 못 따라 감점됐음
+        self.declare_parameter('detour_max_speed', 8.0)
+        self.detour_max_speed = float(self.get_parameter('detour_max_speed').value)
+        self.detour_slow_speed = float(self.get_parameter('detour_slow_speed').value)
+        self.detour_map = DetourMap()
+        self.detour = None
+        self.detour_zone = None          # 우회 경로를 만든 회피 구간
+        self.detour_cap = math.inf       # 여유를 줄여 만든 우회 경로의 속력 상한
+        self.current_zone = None         # 지금 있는 회피 구간 (관측점 누적 범위)
+        self.last_station = 0.0
+        self.wall_offset = 0.0           # 장애물 구간 벽으로 잰 추정 위치의 옆 어긋남 (m, update_wall_offset)
         self.cfg = AvoidanceConfig(
             horizon=self.ahead_m, step=self.path_step, road_half_width=self.road_half_width,
             vehicle_length=self.vehicle_length, vehicle_width=self.vehicle_width,
@@ -192,7 +218,8 @@ class Planner(Node):
             cruise_speed=self.cruise_speed, avoidance_speed=self.avoidance_speed,
             offsets=tuple(self.get_parameter('lateral_offsets').value),
             transition_times=tuple(self.get_parameter('transition_times').value),
-            return_time=self.return_time,
+            return_time=self.return_time, decel=self.profile_decel, tight_speed=self.tight_speed,
+            return_gap=self.return_gap,
         )
         if (not all(math.isfinite(v) for v in (self.obstacle_timeout, self.odom_timeout, self.clock_tolerance))
                 or self.obstacle_timeout <= 0 or self.odom_timeout <= 0 or self.clock_tolerance < 0):
@@ -255,6 +282,9 @@ class Planner(Node):
         self.route.reset()
         self.odom = None
         self.obstacles = self.observation_stamp = self.previous = None
+        self.detour = None               # 복귀하면 지금 자세에서 다시 만듦 (모은 장애물 점은 유지)
+        if reload:
+            self.detour_map.clear()
         self.reset_roundabout_state()
         self.reset_time = self.now()
         self.active = True
@@ -876,11 +906,119 @@ class Planner(Node):
             self.obstacles = None
             return
         self.observation_stamp = stamp
+        self.accumulate(xy)
         self.collect_parking_points(self.obstacles)
         if self.npc is not None:
             self.npc.update(stamp, self.obstacles)
 
+    def accumulate(self, xy):
+        """지금 회피 구간 근처 관측점을 Frenet 칸으로 모읍니다 (정지 장애물·벽)."""
+        if not self.detour_enabled or self.current_zone is None or self.reference is None or not len(xy):
+            return
+        low, high = self.current_zone[0] - 5.0, self.current_zone[1] + 5.0
+        station, lateral = self.reference.project(xy, low - 5.0, high + 5.0)
+        self.update_wall_offset(station, lateral)
+        keep = (station > low) & (station < high) & (np.abs(lateral) < self.road_half_width + 0.75)
+        if np.any(keep):
+            # 벽 기준 좌표로 모음: GNSS 잡음으로 추정 위치가 옆으로 흔들려도 스캔마다 벽에 맞춰 두면 번지지 않음
+            self.detour_map.add(station[keep], lateral[keep] - self.wall_offset)
+
+    def update_wall_offset(self, station, lateral):
+        """이번 스캔에서 장애물 구간 벽(코스 파일 ±3.75, LiDAR로는 약 ±3.8)이 보이는 횡위치로 추정 위치의 옆
+        어긋남(wall_offset, m)을 잽니다. 장애물·우회 경로는 벽 기준으로 만들고 내보낼 때 이만큼 옮깁니다.
+        GNSS 잡음(0.3~0.5 m)이 장애물 옆 여유(0.65 m)를 먹어 감점되던 것을 막습니다."""
+        mission = self.obstacle_zones.get(self.current_zone, self.current_zone)
+        near = ((station > max(mission[0] + 1.0, self.last_station - 5.0))
+                & (station < min(mission[1] - 1.0, self.last_station + 15.0)))
+        wall = self.road_half_width + 0.05
+        estimates = []
+        for side in (1.0, -1.0):
+            points = lateral[near & (side * lateral > wall - 0.8) & (side * lateral < wall + 0.8)]
+            if len(points) >= 10:
+                estimates.append(float(np.median(points)) - side * wall)
+        if estimates:
+            measured = max(-0.8, min(0.8, float(np.mean(estimates))))
+            self.wall_offset += 0.5 * (measured - self.wall_offset)
+
+    def follow_detour(self, zone, station, ego, header, route_speed):
+        """우회 경로를 (필요하면 새로) 만들어 기준 경로처럼 내보냄. 못 만들면 False (Frenet 회피로)."""
+        obs_s, obs_d = self.detour_map.points()
+        s_ego, d_ego = self.reference.project([[ego.x, ego.y]], station - 3.0, station + 3.0)
+        s_ego, d_ego = float(s_ego[0]), float(d_ego[0]) - self.wall_offset   # 벽 기준 횡위치
+        replan = self.detour is None or self.detour_zone != zone
+        if not replan:
+            # 다시 만드는 경우: 실제 위치가 경로에서 0.8 m 넘게 벗어남, 또는 앞쪽 장애물 배치(개수·벽 쪽·
+            # 위치 0.6 m)가 만들 때와 달라짐 (가려졌던 장애물이 보임). 매 주기 후보 탐색은 하지 않습니다
+            planned = float(np.interp(s_ego, self.detour.s, self.detour.d))
+            scene = read_obstacles(obs_s, obs_d, self.obstacle_zones.get(zone, zone), s_ego, self.cfg)
+            ahead = [(a, side) for a, side in scene_signature(scene) if a > s_ego + 1.0]
+            known = [(a, side) for a, side in self.detour.signature if a > s_ego + 1.0]
+            same = len(ahead) == len(known) and all(
+                side == old_side and abs(a - old_a) < 0.6 for (a, side), (old_a, old_side) in zip(ahead, known))
+            replan = abs(planned - d_ego) > 0.8 or s_ego > self.detour.s[-1] - 1.0 or not same
+        if replan:
+            _, base_yaw, _, _ = self.reference.evaluate(np.array([s_ego]))
+            slope = math.tan(max(-1.0, min(1.0, math.atan2(math.sin(ego.yaw - base_yaw[0]),
+                                                           math.cos(ego.yaw - base_yaw[0])))))
+            if (self.detour is not None and self.detour_zone == zone
+                    and self.detour.s[0] <= s_ego <= self.detour.s[-1]):
+                # 가려졌던 장애물이 보여 다시 만들 때: 차가 이미 따르던 경로 위 횡위치·기울기에서 이어 붙임.
+                # 실제 위치(추종 지연으로 덜 비킨 곳)에서 다시 시작하면 남은 거리가 짧아져 급히 꺾게 됨
+                planned_d = float(np.interp(s_ego, self.detour.s, self.detour.d))
+                if abs(planned_d - d_ego) < 0.4:
+                    d_ego = planned_d
+                    slope = float(np.interp(s_ego, self.detour.s, self.detour.d_prime))
+            mission = self.obstacle_zones.get(zone, zone)
+            self.detour = None
+            # 여유를 줄인 우회 경로는 추종 오차를 줄이려 천천히 (감점 1회 = 점수 ×0.8, 30 s보다 큼).
+            # 마지막은 여유 검사 없이 템플릿을 아주 천천히: 멈추면 시간 초과로 실패하므로 서지 않습니다
+            margins = (self.cfg.margin, 0.5 * self.cfg.margin, 0.0)
+            caps = {margins[0]: math.inf, margins[1]: self.detour_slow_speed, margins[2]: self.cfg.tight_speed}
+            for check in (True, False):
+                detour, reason = plan_detour(self.reference, s_ego, d_ego, slope, obs_s, obs_d, mission, zone[1],
+                                             replace(self.cfg, max_lateral_accel=self.detour_lateral_accel,
+                                                     cruise_speed=min(self.cruise_speed, self.detour_max_speed)),
+                                             margins=margins, check=check)
+                if detour is not None:
+                    cap = caps[detour.margin] if check else self.cfg.creep_speed
+                    self.detour, self.detour_zone, self.detour_cap = detour, zone, cap
+                    self.get_logger().info(
+                        f'우회 경로: s={s_ego:.1f} d={d_ego:+.2f}에서 장애물 {len(detour.targets)}개 '
+                        + ', '.join(f'{a:.0f}~{b:.0f} m d={t:+.2f}' for a, b, t in detour.targets)
+                        + f', margin {detour.margin:.2f}{"" if check else " (여유 검사 없음)"}, '
+                        + f'남는 여유 {detour.clearance:.2f} m, 최저 {detour.speed.min():.1f} m/s, 상한 {cap:.1f}')
+                    break
+            else:
+                return False
+        detour = self.detour
+        k0 = max(0, int(np.searchsorted(detour.s, s_ego - self.behind_m)))
+        k1 = int(np.searchsorted(detour.s, s_ego + self.ahead_m))
+        path = Path(header=header)
+        # 제어(Stanley)는 앞바퀴 축을 경로에 맞추므로, 우회 경로(뒤차축 궤적)를 그대로 주면 지그재그에서 뒤차축이
+        # 곡선 안쪽으로 √(R²+L²)−R(κ 0.12에서 약 0.5 m)만큼 파고들어 장애물 옆 횡위치가 0.3 m 모자랐습니다.
+        # 뒤차축이 계획대로 지날 때 앞바퀴 축이 있을 자리(축간거리만큼 앞)를 내보냅니다.
+        normal = np.column_stack((-np.sin(detour.yaw), np.cos(detour.yaw)))
+        trace = (detour.xy + self.wall_offset * normal
+                 + self.wheelbase * np.column_stack((np.cos(detour.yaw), np.sin(detour.yaw))))
+        heading = np.unwrap(np.arctan2(np.gradient(trace[:, 1]), np.gradient(trace[:, 0])))
+        for (x, y), heading in zip(trace[k0:k1 + 1], heading[k0:k1 + 1]):
+            ps = PoseStamped(header=header)
+            ps.pose.position.x, ps.pose.position.y = float(x), float(y)
+            ps.pose.orientation.z, ps.pose.orientation.w = math.sin(float(heading) / 2), math.cos(float(heading) / 2)
+            path.poses.append(ps)
+        if len(path.poses) < 2:
+            return False
+        self.pub.publish(path)
+        speed = min(route_speed, detour.speed_at(s_ego, max(ego.speed, 0.0) * self.speed_preview_s + 1.0),
+                    self.detour_cap)
+        self.speed_pub.publish(Float32(data=speed))
+        self.gear_pub.publish(Int8(data=0))
+        target = next((t for a, b, t in detour.targets if b >= s_ego), 0.0)
+        self.publish_status('detour', offset=target, speed=speed, tight=detour.margin < self.cfg.margin)
+        return True
+
     def plan(self):
+        self.plan_started = time.perf_counter()     # 계획 계산 시간 측정 (status의 plan_ms)
         if not self.active:
             return
         if self.odom is None or self.reference is None:
@@ -913,7 +1051,10 @@ class Planner(Node):
         route_speed = min(route_speed, self.parking_detect(self.park_station, speed, now))
         if self.park_plan is not None and self.plan_parking(path, p, yaw, speed, now):
             return
-        in_zone = self.avoidance_ranges is None or any(a <= station <= b for a, b in self.avoidance_ranges)
+        zone = next(((a, b) for a, b in self.avoidance_ranges or () if a <= station <= b), None)
+        in_zone = self.avoidance_ranges is None or zone is not None
+        self.current_zone = zone
+        self.last_station = station
         if not in_zone:
             self.previous = None
         if not self.avoidance_enabled or not in_zone:
@@ -936,8 +1077,18 @@ class Planner(Node):
             self.publish_stop('sensor_unavailable')
             return
         ego = Ego(p.x, p.y, yaw, self.odom.twist.twist.linear.x)
+        if (self.detour_enabled and zone is not None
+                and self.follow_detour(zone, station, ego, path.header, route_speed)):
+            self.previous = None
+            return
+        # (우회 경로를 못 만들 때만) Frenet 후보 회피. 회피 구간 끝(check_end)까지만 관측물을 검사하고 그 전에
+        # 기준 경로로 돌아옵니다. 구간 뒤 좁은 곡선 통로의 벽까지 검사하면 기준 경로조차 충돌로 판정됨
         result = plan_avoidance(self.reference, ego, self.obstacles, self.cfg,
-                                self.previous, float(self.reference.stations[i]))
+                                self.previous, float(self.reference.stations[i]),
+                                check_end=zone[1] if zone is not None else None,
+                                obstacle_zone=self.obstacle_zones.get(zone, zone),
+                                start_level=self.plan_level if self.previous is not None else 0)
+        self.plan_level = result.level
         self.publish_debug(path.header, result.candidates, result.selected)
         if result.selected is None:
             self.publish_stop(result.reason, result.candidates, clear_markers=False)
@@ -949,10 +1100,10 @@ class Planner(Node):
             ps.pose.orientation.w = math.cos(float(heading) / 2)
             path.poses.append(ps)
         self.pub.publish(path)
-        # 기준 경로를 따를 때는 속도 프로파일, 옆으로 비킬 때는 회피 경로의 곡률·회피 속력 제한도 함께
+        # 속도 프로파일과 회피 경로의 곡률 속력(감속 한계로 미리 반영) 중 작은 값
         avoiding = np.max(np.abs(result.selected.d)) > 0.3
         tight = result.reason == 'tight'           # 여유를 줄여 찾은 경로: 회피 경로가 아니어도 천천히
-        speed = min(route_speed, float(result.speed)) if avoiding or tight else route_speed
+        speed = min(route_speed, float(result.speed))
         self.speed_pub.publish(Float32(data=speed))
         self.gear_pub.publish(Int8(data=0))
         self.previous = result.selected
@@ -960,7 +1111,8 @@ class Planner(Node):
                             result.candidates, result.selected.offset, speed, tight)
 
     def load_avoidance_ranges(self):
-        """회피를 켤 경로 거리 구간 [(시작, 끝), ...]."""
+        """회피를 켤 경로 거리 구간 [(시작, 끝), ...]. self.obstacle_zones에 구간별 원래 미션 구간을 둡니다."""
+        self.obstacle_zones = {}
         flat = [float(v) for v in self.get_parameter('avoidance_zones').value]
         if flat != [-1.0]:
             return [(flat[k], flat[k + 1]) for k in range(0, len(flat) - 1, 2)]
@@ -985,6 +1137,7 @@ class Planner(Node):
             stations, _ = self.reference.project(np.asarray(mission['zone'], dtype=float))
             ranges.append((max(0.0, float(stations.min()) - self.avoidance_zone_before),
                            float(stations.max()) + self.avoidance_zone_after))
+            self.obstacle_zones[ranges[-1]] = (float(stations.min()), float(stations.max()))
         return sorted(ranges)
 
     def build_profile(self):
@@ -1040,7 +1193,9 @@ class Planner(Node):
 
     def publish_status(self, reason, candidates=(), offset=0.0, speed=0.0, tight=False):
         payload = {'state': reason, 'offset_m': float(offset), 'speed_limit_mps': float(speed), 'tight': bool(tight),
-                   'candidate_results': dict(Counter(c.reason for c in candidates))}
+                   'candidate_results': dict(Counter(c.reason for c in candidates)),
+                   'level': int(self.plan_level),
+                   'plan_ms': round(1000 * (time.perf_counter() - getattr(self, 'plan_started', time.perf_counter())), 1)}
         payload.update(self.dynamic_info)
         payload.update(self.park_info)
         self.status_pub.publish(String(data=json.dumps(payload)))

@@ -24,6 +24,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 
 from geometry_msgs.msg import Point
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan, PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
@@ -90,6 +91,10 @@ class LidarPerception(Node):
         self.create_subscription(LaserScan, '/hk/sensors/lidar/scan', self.on_scan,
                                  QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
         self.create_timer(0.02, self.publish_pending_scan)
+        # TF 지연 대체용: 최신 odom으로 '지금 정지 중'인지 확인 (TF 기록만 보면 지연된 과거의 정지를 믿게 됨)
+        self.odom_stamp = None
+        self.still_since = None
+        self.create_subscription(Odometry, '/hk/local/odom', self.on_odom, 10)
         SimEvents(self, self.on_reset, self.on_end)
 
     def on_reset(self, checkpoint, reload):
@@ -162,10 +167,13 @@ class LidarPerception(Node):
         try:
             transform = self.tf_buffer.lookup_transform('map', m.header.frame_id, Time.from_msg(m.header.stamp))
         except TransformException as exc:
-            # Retry when the corresponding TF arrives. Never relabel local XY
-            # as map, or substitute an unrelated latest transform.
-            self.get_logger().warning(f'측정 시각의 map <- {m.header.frame_id} TF 대기: {exc}', throttle_duration_sec=2.0)
-            return False
+            # 부하가 크면 TF 수신이 수 초 밀려 측정 시각 TF가 끝내 오지 않고 스캔이 모두 버려집니다
+            # (주차 칸 검출 대기 중 멈춤). 차가 서 있으면 최신 TF가 측정 시각 자세와 같으므로 그것을 씁니다.
+            transform = self.stationary_transform(
+                m.header.frame_id, m.header.stamp.sec + m.header.stamp.nanosec * 1e-9)
+            if transform is None:
+                self.get_logger().warning(f'측정 시각의 map <- {m.header.frame_id} TF 대기: {exc}', throttle_duration_sec=2.0)
+                return False
         clusters = jump_distance_clusters(
             ranges, m.angle_min, m.angle_increment, m.range_min, m.range_max,
             self.jump_base, self.jump_scale, self.max_obstacle_range,
@@ -186,6 +194,38 @@ class LidarPerception(Node):
         self.obstacle_pub.publish(point_cloud2.create_cloud(header, fields, points))
         self.publish_markers(header, clusters)
         return True
+
+    @staticmethod
+    def tf_stamp_s(t):
+        return t.header.stamp.sec + t.header.stamp.nanosec * 1e-9
+
+    def on_odom(self, m):
+        stamp = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+        v = math.hypot(m.twist.twist.linear.x, m.twist.twist.linear.y)
+        if v > 0.05:
+            self.still_since = None
+        elif self.still_since is None:
+            self.still_since = stamp
+        self.odom_stamp = stamp
+
+    def stationary_transform(self, frame_id, scan_stamp, window_s=0.5, max_move=0.03, max_turn=0.005):
+        """odom상 스캔 시각까지 정지가 이어지고, 최신 TF와 window_s 전 TF도 같으면 최신 TF, 아니면 None."""
+        if (self.odom_stamp is None or self.still_since is None or abs(self.odom_stamp - scan_stamp) > 0.3
+                or scan_stamp - self.still_since < window_s):
+            return None
+        try:
+            latest = self.tf_buffer.lookup_transform('map', frame_id, Time())
+            stamp = Time.from_msg(latest.header.stamp)
+            earlier = self.tf_buffer.lookup_transform('map', frame_id, stamp - Duration(seconds=window_s))
+        except TransformException:
+            return None
+        a, b = latest.transform, earlier.transform
+        moved = math.hypot(a.translation.x - b.translation.x, a.translation.y - b.translation.y)
+        turned = abs(a.rotation.z - b.rotation.z) + abs(a.rotation.w - b.rotation.w)
+        if moved > max_move or turned > max_turn or self.tf_stamp_s(latest) < self.still_since:
+            return None
+        self.get_logger().info('측정 시각 TF 지연: 정지 중이라 최신 TF 사용', throttle_duration_sec=2.0)
+        return latest
 
     def publish_markers(self, header, clusters):
         markers = [Marker(action=Marker.DELETEALL)]

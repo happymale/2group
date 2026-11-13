@@ -20,7 +20,7 @@ hk_mit_planner:
     rear_overhang: 0.79
     wheelbase: 3.0
     max_steer_deg: 35.4
-    max_lateral_accel: 1.8
+    max_lateral_accel: 3.0        # 회피 경로 횡가속도 한계 → 곡률 속력 sqrt(a/κ)를 감속 한계로 미리 반영
     cruise_speed: 14.0            # 직선 최고 속력. launch의 target_speed:=… 가 덮어씀 (launch 기본값도 14.0)
     corner_lateral_accel: 8.0     # 곡선 횡가속도 한계 → 곡선 속력 sqrt(a/κ). 옵션 없음 실측: 8 → S자 여유 0.45 m, 9 → 조향 포화로 감점(cp4 S자)
     profile_accel: 3.5            # 속도 프로파일 가속 한계 (m/s², accel=1 실측 약 4)
@@ -29,10 +29,18 @@ hk_mit_planner:
     # 구간별 속력 상한 [시작 s, 끝 s, 상한 m/s, ...]. s는 route.csv 경로 거리(m):
     # cp1 13, cp2 58, cp3 166.5, cp4 192, cp5 275.4, cp6 405.4, cp7 465.4, cp8 494.9, cp9 529.9, cp10 571.9, cp11 655.9, 결승 670.9
     speed_zones: [0.0, 0.0, 100.0]
-    avoidance_speed: 6.0
+    avoidance_speed: 10.0         # (Frenet 대비) 회피 중 속력 상한이자 옆 이동·복귀 길이 기준 속력
+    tight_speed: 3.0              # 여유를 줄여 찾은 경로의 속력 상한
+    return_time: 2.0              # 복귀 길이 = avoidance_speed × return_time (구간 끝 전에 끝나게 줄임)
+    return_gap: 1.5               # 마지막 장애물 점 뒤 이만큼 더 간 뒤 복귀 (보이지 않는 뒷면)
+    detour_enabled: true          # 장애물 구간: LiDAR로 모은 장애물(2 × 4.3 m 상자, 한쪽 벽에 붙음)로 전역 경로 우회 (detour.py)
+    detour_lateral_accel: 2.0     # 우회 경로 속력용 횡가속도 (지그재그 추종 지연을 줄이려 낮게)
+    detour_slow_speed: 4.0        # margin 반으로 줄인 우회 경로의 속력 상한
+    detour_max_speed: 5.0         # 우회 경로 최고 속력 (추종·위치 잡음 여유 0.3 m 이상을 위해 신뢰성 우선)
+    avoidance_zone_before: 25.0   # 장애물 구간 25 m 앞부터 점을 모으고 우회 경로를 만듦 (14 m/s 접근에서 옆 이동 거리 확보)
     lateral_offsets: [-2.3, -2.0, -1.6, -1.0, 0.0, 1.0, 1.6, 2.0, 2.3]
-    transition_times: [2.0, 3.0, 4.0]
-    obstacle_timeout: 0.5 
+    transition_times: [1.2, 2.0, 3.0]
+    obstacle_timeout: 1.0         # 정지 장애물은 map 좌표로 1 s 지나도 유효. CPU 부하로 한 스캔이 늦어도 멈추지 않게
     odom_timeout: 0.5 
     clock_tolerance: 0.05          # 노드 간 /clock 전달 순서 차이 (s)
     # 회전교차로 (roundabout.py). route.csv의 진입·진출 꺾임(R≈2.5)을 접선 원호로 바꾸고 NPC에 양보·차간 유지

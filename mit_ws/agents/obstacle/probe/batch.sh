@@ -2,13 +2,13 @@
 # 사용: batch.sh 결과파일 "이름 seed cp stop options yaml(T|A) zlo zhi slo" ...
 OUT=$1; shift
 T=/mit_ws/agents/obstacle/probe/ob3_test.yaml
-A=/mit_ws/agents/obstacle/install/hk_mit/share/hk_mit/config/all_options.yaml
+A=${WS:-/mit_ws/agents/obstacle}/install/hk_mit/share/hk_mit/config/all_options.yaml
 B=1
 : > $OUT
 for spec in "$@"; do
   read name seed cp stop opts y zlo zhi slo <<< "$spec"
   [ "$y" = T ] && Y=$T || Y=$A
-  SEED=$seed BUILD=$B EXTRA=$Y START_CP=$cp STOP_S=$stop OPTIONS=$opts PROBE_S=90 WS=/mit_ws/agents/obstacle \
+  SEED=$seed BUILD=$B EXTRA=$Y START_CP=$cp STOP_S=$stop OPTIONS=$opts PROBE_S=90 WS=${WS:-/mit_ws/agents/obstacle} \
     timeout 400 bash /mit_ws/agents/obstacle/probe/run.sh $name > /mit_ws/agents/obstacle/runs/$name.batch.txt 2>&1
   B=0
   source /etc/heven.bashrc

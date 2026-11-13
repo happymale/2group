@@ -6,7 +6,7 @@ hk_mit_planner:
     # LiDAR 충돌 검사가 막으므로 가상 경계는 넓은 구간 기준으로 둡니다 (2.196이면 회피 후보가 전부 road_boundary)
     road_half_width: 3.75
     lateral_offsets: [-2.3, -2.0, -1.6, -1.0, 0.0, 1.0, 1.6, 2.0, 2.3]
-    obstacle_timeout: 0.5
+    obstacle_timeout: 1.0
     odom_timeout: 0.5
     safety_margin: 0.2
     surface_padding: 0.15

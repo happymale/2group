@@ -3,7 +3,7 @@ import pickle, sys, csv, numpy as np
 sys.path.insert(0, '/mit_ws/agents/obstacle/src/hk_mit')
 import hk_mit.avoidance as A
 name, zs, ze = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
-d = pickle.load(open(f'/mit_ws/agents/obstacle/runs/{name}.probe.pkl', 'rb'))
+d = pickle.load(open(f'/mit_ws/agents/obstacle/runs/{sys.argv[4] if len(sys.argv) > 4 else name}.probe.pkl', 'rb'))
 route = np.array([(float(r['x']), float(r['y'])) for r in csv.DictReader(open('/mit_ws/agents/obstacle/src/hk_mit/course/route.csv'))])
 ref = A.ReferencePath(route)
 pts = np.vstack([c[2] for c in d['clouds'] if len(c[2])]).astype(float)
