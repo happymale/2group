@@ -1,0 +1,90 @@
+--- a/hk_mit/planner.py	2026-11-14 04:34:25.069789000 +0900
++++ b/hk_mit/planner.py	2026-11-14 05:03:44.946854900 +0900
+@@ -201,6 +201,9 @@
+         # 우회 경로 최고 속력: 14 m/s로 들어오면 옆 이동이 늦고 조향 지연(0.3 s)에 추종이 못 따라 감점됐음
+         self.declare_parameter('detour_max_speed', 8.0)
+         self.detour_max_speed = float(self.get_parameter('detour_max_speed').value)
++        # 장애물이 하나뿐인 우회(obstacle1 등)의 장애물 옆 속력 상한, 장애물 밖(접근·복귀)은 곡률·감속 한계만
++        self.declare_parameter('detour_single_speed', 8.0)
++        self.detour_single_speed = float(self.get_parameter('detour_single_speed').value)
+         self.detour_slow_speed = float(self.get_parameter('detour_slow_speed').value)
+         self.detour_map = DetourMap()
+         self.detour = None
+@@ -978,6 +981,8 @@
+                 detour, reason = plan_detour(self.reference, s_ego, d_ego, slope, obs_s, obs_d, mission, zone[1],
+                                              replace(self.cfg, max_lateral_accel=self.detour_lateral_accel,
+                                                      cruise_speed=min(self.cruise_speed, self.detour_max_speed)),
++                                             single_speed=min(self.cruise_speed, self.detour_single_speed),
++                                             free_speed=self.cruise_speed,
+                                              margins=margins, check=check)
+                 if detour is not None:
+                     cap = caps[detour.margin] if check else self.cfg.creep_speed
+--- a/hk_mit/detour.py	2026-11-14 04:34:25.074312000 +0900
++++ b/hk_mit/detour.py	2026-11-14 04:57:00.792203500 +0900
+@@ -178,7 +178,7 @@
+ 
+ 
+ def plan_detour(reference, s_ego, d_ego, slope, obs_s, obs_d, zone, s_exit, cfg, margins=None, step=0.4,
+-                box=(2.0, 4.3), check=True):
++                box=(2.0, 4.3), check=True, single_speed=None, free_speed=None):
+     """반환 (Detour 또는 None, 이유). zone = (시작 s, 끝 s) 장애물 미션 구간, s_exit까지 d=0으로 돌아옵니다.
+     cfg는 avoidance.AvoidanceConfig (차체 크기, road_half_width, surface_padding, max_lateral_accel,
+     cruise_speed, decel, return_gap, min_transition). check=False면 여유 검사 없이(곡률만) 템플릿을 씁니다:
+@@ -197,6 +197,9 @@
+         return None, 'zone_passed'
+     scene = read_obstacles(obs_s, obs_d, zone, s_ego, cfg, box)
+     groups, sides = scene['groups'], scene['sides']
++    if single_speed is not None and len(groups) <= 1:
++        # 장애물 하나(옆으로 한 번 비키고 돌아옴)는 지그재그가 없어 더 빨리 지나도 추종 여유가 남음
++        cfg = replace(cfg, cruise_speed=max(cfg.cruise_speed, single_speed))
+     gap_s, gap_d, check_s, check_d = scene['gap_s'], scene['gap_d'], scene['check_s'], scene['check_d']
+     intervals = []
+     for a, b in groups:
+@@ -284,6 +287,8 @@
+     if best is None:
+         return None, 'no_feasible_detour'
+     best.signature = scene_signature(scene)
++    if free_speed is not None and best.targets:
++        best.speed = passage_speed(best, cfg.cruise_speed, max(free_speed, cfg.cruise_speed), cfg)
+     return best, 'ok'
+ 
+ 
+@@ -332,6 +337,19 @@
+     return [sequence for sequence, _ in sequences]
+ 
+ 
++def passage_speed(detour, inside_cap, free_speed, cfg):
++    """우회 경로 속력: 장애물을 지나는 동안(앞범퍼가 첫 장애물 2 m 앞 ~ 마지막 장애물 뒤 1 m)만 inside_cap,
++    구간 앞 접근과 복귀는 곡률 속력·감속 한계만으로 (free_speed까지)."""
++    front = cfg.vehicle_length - cfg.rear_overhang
++    inside = (detour.s >= detour.targets[0][0] - front - 2.0) & (detour.s <= detour.targets[-1][1] + 1.0)
++    arc = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(detour.xy, axis=0), axis=1))]
++    speed = np.minimum(np.sqrt(cfg.max_lateral_accel / np.maximum(np.abs(detour.curvature), 1e-6)),
++                       np.where(inside, inside_cap, free_speed))
++    for i in range(len(speed) - 2, -1, -1):
++        speed[i] = min(speed[i], math.sqrt(speed[i + 1]**2 + 2 * cfg.decel * (arc[i + 1] - arc[i])))
++    return speed
++
++
+ def _travel_time(detour):
+     return float(np.sum(np.diff(detour.s) / np.maximum(detour.speed[:-1], 0.5)))
+ 
+--- a/config/bringup.yaml	2026-11-14 04:34:25.072314800 +0900
++++ b/config/bringup.yaml	2026-11-14 05:03:45.018697200 +0900
+@@ -32,11 +32,12 @@
+     avoidance_speed: 10.0         # (Frenet 대비) 회피 중 속력 상한이자 옆 이동·복귀 길이 기준 속력
+     tight_speed: 3.0              # 여유를 줄여 찾은 경로의 속력 상한
+     return_time: 2.0              # 복귀 길이 = avoidance_speed × return_time (구간 끝 전에 끝나게 줄임)
+-    return_gap: 1.5               # 마지막 장애물 점 뒤 이만큼 더 간 뒤 복귀 (보이지 않는 뒷면)
++    return_gap: 1.0               # 마지막 장애물 뒤 이만큼 더 간 뒤 복귀 (상자 깊이 2 m는 이미 채움)
+     detour_enabled: true          # 장애물 구간: LiDAR로 모은 장애물(2 × 4.3 m 상자, 한쪽 벽에 붙음)로 전역 경로 우회 (detour.py)
+-    detour_lateral_accel: 2.0     # 우회 경로 속력용 횡가속도 (지그재그 추종 지연을 줄이려 낮게)
+-    detour_slow_speed: 4.0        # margin 반으로 줄인 우회 경로의 속력 상한
+-    detour_max_speed: 5.0         # 우회 경로 최고 속력 (추종·위치 잡음 여유 0.3 m 이상을 위해 신뢰성 우선)
++    detour_lateral_accel: 2.5     # 우회 경로 속력용 횡가속도
++    detour_slow_speed: 6.0        # margin 반으로 줄인 우회 경로의 속력 상한 (실측 여유 0.12~0.39 m, 4 m/s와 같은 수준)
++    detour_max_speed: 6.5         # 장애물 여럿(지그재그)을 지나는 동안의 속력 상한. 접근·복귀는 곡률·감속 한계만
++    detour_single_speed: 9.0      # 장애물 하나(한 번 비킴)를 지나는 동안의 속력 상한
+     avoidance_zone_before: 25.0   # 장애물 구간 25 m 앞부터 점을 모으고 우회 경로를 만듦 (14 m/s 접근에서 옆 이동 거리 확보)
+     lateral_offsets: [-2.3, -2.0, -1.6, -1.0, 0.0, 1.0, 1.6, 2.0, 2.3]
+     transition_times: [1.2, 2.0, 3.0]

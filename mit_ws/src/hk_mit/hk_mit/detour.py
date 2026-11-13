@@ -178,7 +178,7 @@ def scene_signature(scene):
 
 
 def plan_detour(reference, s_ego, d_ego, slope, obs_s, obs_d, zone, s_exit, cfg, margins=None, step=0.4,
-                box=(2.0, 4.3), check=True):
+                box=(2.0, 4.3), check=True, single_speed=None, free_speed=None):
     """반환 (Detour 또는 None, 이유). zone = (시작 s, 끝 s) 장애물 미션 구간, s_exit까지 d=0으로 돌아옵니다.
     cfg는 avoidance.AvoidanceConfig (차체 크기, road_half_width, surface_padding, max_lateral_accel,
     cruise_speed, decel, return_gap, min_transition). check=False면 여유 검사 없이(곡률만) 템플릿을 씁니다:
@@ -197,6 +197,9 @@ def plan_detour(reference, s_ego, d_ego, slope, obs_s, obs_d, zone, s_exit, cfg,
         return None, 'zone_passed'
     scene = read_obstacles(obs_s, obs_d, zone, s_ego, cfg, box)
     groups, sides = scene['groups'], scene['sides']
+    if single_speed is not None and len(groups) <= 1:
+        # 장애물 하나(옆으로 한 번 비키고 돌아옴)는 지그재그가 없어 더 빨리 지나도 추종 여유가 남음
+        cfg = replace(cfg, cruise_speed=max(cfg.cruise_speed, single_speed))
     gap_s, gap_d, check_s, check_d = scene['gap_s'], scene['gap_d'], scene['check_s'], scene['check_d']
     intervals = []
     for a, b in groups:
@@ -284,6 +287,8 @@ def plan_detour(reference, s_ego, d_ego, slope, obs_s, obs_d, zone, s_exit, cfg,
     if best is None:
         return None, 'no_feasible_detour'
     best.signature = scene_signature(scene)
+    if free_speed is not None and best.targets:
+        best.speed = passage_speed(best, cfg.cruise_speed, max(free_speed, cfg.cruise_speed), cfg)
     return best, 'ok'
 
 
@@ -330,6 +335,19 @@ def _target_sequences(intervals, d_ego, extra):
                 grown.append((sequence + (target,), target))
         sequences = grown[:16]
     return [sequence for sequence, _ in sequences]
+
+
+def passage_speed(detour, inside_cap, free_speed, cfg):
+    """우회 경로 속력: 장애물을 지나는 동안(앞범퍼가 첫 장애물 2 m 앞 ~ 마지막 장애물 뒤 1 m)만 inside_cap,
+    구간 앞 접근과 복귀는 곡률 속력·감속 한계만으로 (free_speed까지)."""
+    front = cfg.vehicle_length - cfg.rear_overhang
+    inside = (detour.s >= detour.targets[0][0] - front - 2.0) & (detour.s <= detour.targets[-1][1] + 1.0)
+    arc = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(detour.xy, axis=0), axis=1))]
+    speed = np.minimum(np.sqrt(cfg.max_lateral_accel / np.maximum(np.abs(detour.curvature), 1e-6)),
+                       np.where(inside, inside_cap, free_speed))
+    for i in range(len(speed) - 2, -1, -1):
+        speed[i] = min(speed[i], math.sqrt(speed[i + 1]**2 + 2 * cfg.decel * (arc[i + 1] - arc[i])))
+    return speed
 
 
 def _travel_time(detour):

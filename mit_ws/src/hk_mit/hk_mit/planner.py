@@ -45,8 +45,9 @@ from visualization_msgs.msg import Marker, MarkerArray
 from .avoidance import AvoidanceConfig, Ego, ReferencePath, footprint_corners, plan_avoidance, speed_profile
 from .detour import DetourMap, plan_detour, read_obstacles, scene_signature
 from .course import COURSE_DIR, declare_file_params, files_signature, load_route, Route
-from .parking import (FORWARD, REVERSE, Maneuver, Mission, ParkingConfig, Segment, SlotFrame, detect_slot,
-                      free_space_ok, parallel_exit, plan_maneuver, road_lateral, splice_route)
+from .parking import (FORWARD, REVERSE, Maneuver, Mission, ParkingConfig, PathBuilder, Segment, SlotFrame,
+                      body_corners, detect_slot, free_space_ok, in_slot, parallel_exit, plan_maneuver, road_lateral,
+                      splice_route)
 from .roundabout import NpcTracker, follow_speed, merge_conflicts, ring_reference, stop_point, travel_time, wrap
 from .sim_events import SimEvents
 
@@ -120,9 +121,16 @@ PARAMS = {              # config/bringup.yaml에서 바꿉니다. 아래는 기�
     'parking_slot_margin': 0.15,      # 계획한 최종 차체가 칸 경계 안쪽으로 들어온 거리 (규정 0.05)
     'parking_radius_margin': 1.05,    # 최소 회전반경 × 이 값 이상 원호만
     'parking_voxel': 0.1,             # 관측점 누적 격자 (m)
+    'parking_check_margin': 0.05,     # 유지 전 자체 검사: 추정 꼭짓점이 칸 경계 안쪽 이 거리(m) 이상
+    'parking_check_yaw_deg': 12.0,    # 자체 검사 방향 오차 한계 (도, 규정 20°)
+    'parking_max_retries': 2.0,       # 검사 실패 시 다시 들어가기 최대 횟수
+    'parking_retry_pull': 4.0,        # 후면: 다시 들어가기 전 앞으로 갈 거리 (m)
+    'parking_reverse_lateral_accel': 1.2,  # 후진 원호 횡가속도 한계 (m/s²)
     'parking_point_window': 3.0,      # 칸 검출에 이 시간(s) 안에 본 점만 씀
     'rear_back_wall_x': -2.8,         # 후면주차 방 북쪽 벽 (칸 좌표계 x, 칸 끝에서 0.1 m 뒤). 후진 정지 지점을 이 벽 기준으로
     'parking_wall_search': 0.6,       # 예상 위치 ± 이 거리(m)에서 벽 점을 찾고, 정지 지점을 최대 이만큼 옮김
+    'parallel_back_wall_x': -4.0,     # 평행주차 홈 뒤쪽 벽 (칸 좌표계 x). 후진 정지 지점을 이 벽 기준으로 (0이면 끔)
+    'parking_preshift_s': 0.3,        # 유지 끝나기 이만큼(s) 전에 다음 구간으로 넘어가 (속력 0 유지) 기어·조향을 미리 바꿈
 }
 SETTLE_S = 0.5          # 시작·복귀 뒤 이 시간 동안은 경로 전체에서 위치를 다시 찾음 (늦게 온 예전 위치 대비)
 
@@ -201,6 +209,9 @@ class Planner(Node):
         # 우회 경로 최고 속력: 14 m/s로 들어오면 옆 이동이 늦고 조향 지연(0.3 s)에 추종이 못 따라 감점됐음
         self.declare_parameter('detour_max_speed', 8.0)
         self.detour_max_speed = float(self.get_parameter('detour_max_speed').value)
+        # 장애물이 하나뿐인 우회(obstacle1 등)의 장애물 옆 속력 상한, 장애물 밖(접근·복귀)은 곡률·감속 한계만
+        self.declare_parameter('detour_single_speed', 8.0)
+        self.detour_single_speed = float(self.get_parameter('detour_single_speed').value)
         self.detour_slow_speed = float(self.get_parameter('detour_slow_speed').value)
         self.detour_map = DetourMap()
         self.detour = None
@@ -366,8 +377,10 @@ class Planner(Node):
         self.park_wait_since = None
         self.park_stop_since = None
         self.park_hold_since = None
+        self.park_release = None         # 이 시각까지는 속력 0 (유지 중 다음 구간으로 미리 넘어감)
         self.park_info = {}
         self.park_station = None
+        self.park_still_since = None     # 차가 멈춘 시각 (odom), 감시 중 점 모으기에 씀
         self.park_offsets = []           # [(끼운 경로의 경로 거리, 원래 경로보다 늘어난 길이)] 속도 프로파일 대응용
         self.route_spliced = False       # 경로에 주차 동작을 넣었음 (복귀하면 base_points로 되돌림)
         self.route_yaws = self.route_gears = None
@@ -425,6 +438,9 @@ class Planner(Node):
                 & (np.abs(local[:, 1] - mission.y_road) < 18.0))
         if not keep.any():
             return
+        if (self.park_wait_since is not None and self.observation_stamp - self.park_wait_since > 4.0
+                and (self.park_still_since is None or self.observation_stamp - self.park_still_since < 4.0)):
+            return                                       # 감시 중: 오래 서 있을 때 찍은 점만
         cells = np.round(local[keep] / self.parking_voxel).astype(np.int64)
         stamp = self.observation_stamp
         self.park_voxels.update(dict.fromkeys(map(tuple, cells), stamp))
@@ -490,8 +506,12 @@ class Planner(Node):
             cap = 0.0
             if self.park_wait_since is None and abs(speed) < 0.1:
                 self.park_wait_since = now
+            # 감시: 4 s 넘게 못 찾으면 1.5 s 기어가고 6 s 서기를 되풀이. 서 있는 동안 인지의 '정지 중 최신 TF' 대체가
+            # 동작하고(TF가 몇 초 늦을 때), 움직이면 시점이 바뀜. 이 동안은 4 s 넘게 서 있을 때 찍은 점만 모음
+            # (TF가 늦으면 움직이는 중 점이 엉뚱한 자리에 찍힘). 존 중심 - slide 범위 - 6 m 앞까지만 기어감
             if self.park_wait_since is not None and now - self.park_wait_since > 4.0:
-                cap = 1.0 if a0 - car > mission.slide_range + 6.0 else 0.0
+                phase = (now - self.park_wait_since - 4.0) % 7.5
+                cap = 1.0 if a0 - car > mission.slide_range + 6.0 and phase < 1.5 else 0.0
         self.park_info['wait_cap'] = round(cap, 2)
         return cap
 
@@ -619,7 +639,8 @@ class Planner(Node):
             self.park_stop_since = now
         rem = math.inf
         end = sp.points[b]
-        if gear == REVERSE and stop and plan['mission'].type == 'rear_parking':
+        if gear == REVERSE and stop and (plan['mission'].type == 'rear_parking'
+                                         or (plan['mission'].type == 'parallel_parking' and self.parallel_back_wall_x)):
             end = end + self.back_wall_shift(plan, now)
         if stop:
             direction = sp.yaws[b] + (math.pi if gear == REVERSE else 0.0)
@@ -629,11 +650,16 @@ class Planner(Node):
                                                             and stopped_for > self.parking_short_wait)
             if arrived and not moving:
                 if hold > 0:
+                    if self.park_hold_since is None and not self.check_in_slot(p, yaw):
+                        if self.corrective_maneuver(p, yaw):
+                            return self.plan_parking(path, p, yaw, speed, now)
                     if self.park_hold_since is None:
                         self.park_hold_since = now
                         self.get_logger().info(f'{plan["mission"].id}: 칸 도착 (남은 거리 {rem:+.2f} m), {hold:.1f} s 유지')
                         self.replan_exit(p, yaw)
-                if hold <= 0 or now - self.park_hold_since >= hold:
+                if hold <= 0 or now - self.park_hold_since >= hold - self.parking_preshift_s:
+                    if hold > 0:
+                        self.park_release = self.park_hold_since + hold
                     self.get_logger().info(f'{plan["mission"].id}: {name} 끝 (남은 거리 {rem:+.2f} m)')
                     self.park_seg += 1
                     self.route.idx = segs[self.park_seg][0]
@@ -674,7 +700,7 @@ class Planner(Node):
         if stop:
             ramp = math.sqrt(2 * self.parking_stop_decel * max(0.0, rem - 0.5 * self.parking_stop_tolerance))
             cap = min(cap, ramp if ramp > 0.25 else 0.0)
-        if self.park_hold_since is not None:
+        if self.park_hold_since is not None or (self.park_release is not None and now < self.park_release):
             cap = 0.0
         cap = max(0.0, cap)
         # 부호 = 방향, 크기 2 = 발행한 경로의 끝이 정지 지점, 1 = 경로가 이어짐. 동작 시작 전(기존 경로 위)은 0
@@ -699,8 +725,15 @@ class Planner(Node):
         if clusters:
             frame = SlotFrame(maneuver.slot_center, mission.slot_yaw)
             pts = frame.to_local(np.vstack(clusters))
-            x_wall = self.rear_back_wall_x
-            sel = (np.abs(pts[:, 1]) < 1.6) & (np.abs(pts[:, 0] - x_wall) < self.parking_wall_search)
+            if mission.type == 'parallel_parking':
+                # 홈 뒤쪽 벽: 칸 폭 안쪽만 (도로 쪽 끝 = 도로 벽과 만나는 모서리는 뺌)
+                x_wall = self.parallel_back_wall_x
+                ys = pts[:, 1] * (1.0 if mission.y_road > 0 else -1.0)
+                lateral = (ys > -1.6) & (ys < 1.4)
+            else:
+                x_wall = self.rear_back_wall_x
+                lateral = np.abs(pts[:, 1]) < 1.6
+            sel = lateral & (np.abs(pts[:, 0] - x_wall) < self.parking_wall_search)
             if np.count_nonzero(sel) >= 10:
                 measured = float(np.median(pts[sel, 0])) - x_wall
                 measured = max(-self.parking_wall_search, min(self.parking_wall_search, measured))
@@ -718,13 +751,113 @@ class Planner(Node):
         n = len(sp.points)
         vmax = np.full(n, np.inf)
         a, b = sp.first, sp.last
-        base = np.where(sp.gears[a:b + 1] < 0, self.parking_reverse_speed, self.parking_speed)
+        reverse = sp.gears[a:b + 1] < 0
+        base = np.where(reverse, self.parking_reverse_speed, self.parking_speed)
+        lateral = np.where(reverse, self.parking_reverse_lateral_accel, self.parking_lateral_accel)
         d = np.maximum(np.linalg.norm(np.diff(sp.points[a:b + 2], axis=0), axis=1), 1e-3)
         dyaw = np.abs(np.diff(np.unwrap(sp.yaws[a:b + 2])))
         kappa = np.where(d > 1.0, 0.0, dyaw / d)        # 정지 지점(앞바퀴 축 ↔ 뒤차축 점 사이 3 m 건너뜀)은 제외
         kappa = np.maximum.reduce([np.roll(kappa, k) for k in range(-4, 5)])
-        vmax[a:b + 1] = np.minimum(base, np.sqrt(self.parking_lateral_accel / np.maximum(kappa, 1e-6)))
+        vmax[a:b + 1] = np.minimum(base, np.sqrt(lateral / np.maximum(kappa, 1e-6)))
         return vmax
+
+    def check_in_slot(self, p, yaw):
+        """유지 전에 추정 자세로 칸 안인지 스스로 검사: 네 꼭짓점이 칸 경계 안쪽 parking_check_margin 이상,
+        방향 오차 parking_check_yaw_deg 이하."""
+        plan = self.park_plan
+        mission = plan['mission']
+        frame = SlotFrame(plan['maneuver'].slot_center, mission.slot_yaw)
+        local = frame.to_local(np.array([p.x, p.y]))
+        dyaw = (yaw - mission.slot_yaw + math.pi) % (2 * math.pi) - math.pi
+        corners = body_corners((local[0], local[1], dyaw), self.park_cfg)
+        margin = min(mission.slot_length / 2 - np.abs(corners[:, 0]).max(),
+                     mission.slot_width / 2 - np.abs(corners[:, 1]).max())
+        ok = margin >= self.parking_check_margin and abs(math.degrees(dyaw)) <= self.parking_check_yaw_deg
+        if not ok:
+            self.get_logger().warn(f'{mission.id}: 칸 안 자체 검사 실패 (꼭짓점 여유 {margin:+.2f} m, '
+                                   f'방향 {math.degrees(dyaw):+.1f}°, 자세 {np.round(local, 2).tolist()})')
+        return ok
+
+    def corrective_maneuver(self, p, yaw):
+        """칸 안 검사 실패: 앞으로 빠져나왔다가 다시 후진해 들어가는 구간을 지금 구간 뒤에 넣음 (최대
+        parking_max_retries번). 평행: 실제 자세에서 전진 S자로 도로 중심 → 정지 → 후진 S자 다시.
+        후면: 앞으로 parking_retry_pull m 직진 → 정지 → 계획한 최종 자세로 곧게 후진."""
+        plan = self.park_plan
+        mission, maneuver = plan['mission'], plan['maneuver']
+        if plan.get('retries', 0) >= int(self.parking_max_retries):
+            self.get_logger().error(f'{mission.id}: 다시 들어가기 {plan.get("retries", 0)}번 했으나 실패, 그대로 유지')
+            return False
+        frame = SlotFrame(maneuver.slot_center, mission.slot_yaw)
+        local = frame.to_local(np.array([p.x, p.y]))
+        pose = (float(local[0]), float(local[1]), float((yaw - mission.slot_yaw + math.pi) % (2 * math.pi) - math.pi))
+        wall = plan['detection'].get('wall', self.park_cfg.wall_default)
+        if abs(wall - self.park_cfg.wall_default) > 0.25:
+            wall = self.park_cfg.wall_default
+        rects = [(-80.0, 80.0, mission.y_road - wall, mission.y_road + wall)] + plan['rects']
+        target = maneuver.segments[1].poses[-1]
+        target = (float(frame.to_local(target[:2])[0]), float(frame.to_local(target[:2])[1]), 0.0)
+        r = self.park_cfg.min_radius
+        segs = None
+        for clearance in (self.park_cfg.clearance, 0.5 * self.park_cfg.clearance):
+            cfg = ParkingConfig(**{**self.park_cfg.__dict__, 'clearance': clearance})
+            if mission.type == 'parallel_parking':
+                side = -1.0 if mission.y_road > 0 else 1.0
+                for k in (1.0, 1.1, 1.2, 1.35):
+                    out = parallel_exit(pose, mission.y_road, r * k)
+                    if out is None or not free_space_ok(out, rects, cfg)[0]:
+                        continue
+                    e = out[-1]
+                    d = abs(e[1] - target[1])
+                    th = math.acos(max(-1.0, 1.0 - d / (2 * r)))
+                    b = PathBuilder(tuple(e), self.park_cfg.step)
+                    b.turn(REVERSE, r, th, side > 0).turn(REVERSE, r, th, side < 0)
+                    back = b.result()
+                    if (in_slot(back[-1], mission.slot_length, mission.slot_width, self.park_cfg.slot_margin, cfg)
+                            and free_space_ok(back, rects, cfg)[0]):
+                        segs = (out, back)
+                        break
+            else:
+                out = PathBuilder(pose, self.park_cfg.step).go(FORWARD, self.parking_retry_pull).result()
+                end = out[-1]
+                n = max(2, int(math.ceil(abs(end[0] - target[0]) / self.park_cfg.step)))
+                xs = np.linspace(end[0], target[0], n + 1)
+                ys = np.linspace(end[1], target[1], n + 1)
+                back = np.column_stack((xs, ys, np.full_like(xs, math.atan2(end[1] - target[1], end[0] - target[0]))))
+                if free_space_ok(out, rects, cfg)[0] and free_space_ok(back, rects, cfg)[0]:
+                    segs = (out, back)
+            if segs is not None:
+                break
+        if segs is None:
+            self.get_logger().error(f'{mission.id}: 다시 들어가는 경로를 못 만듦, 그대로 유지')
+            return False
+        out, back = segs
+        old = maneuver.segments
+        k = self.park_seg
+        hold = old[k].hold
+        new_segs = old[:k] + [Segment(old[k].gear, old[k].poses, True, 0.0, old[k].name),
+                              Segment(FORWARD, frame.poses_to_map(out), True, 0.0, 'retry_out'),
+                              Segment(REVERSE, frame.poses_to_map(back), True, hold, 'retry_in')]
+        ex = parallel_exit(back[-1], mission.y_road, r) if mission.type == 'parallel_parking' else None
+        exit_poses = frame.poses_to_map(ex) if ex is not None else old[-1].poses
+        new_segs.append(Segment(FORWARD, exit_poses, False, 0.0, 'exit'))
+        new = Maneuver(new_segs, maneuver.slot_center, maneuver.slide, maneuver.start_x,
+                       float(frame.to_local(exit_poses[-1, :2])[0]), maneuver.info)
+        points, yaws, gears = plan['route_in']
+        spliced = splice_route(points, new, mission, self.wheelbase, yaws, gears)
+        if spliced is None or spliced.segments[k][0] != plan['spliced'].segments[k][0]:
+            self.get_logger().error(f'{mission.id}: 다시 들어가는 경로를 끼우지 못함')
+            return False
+        self.route.points = [(float(px), float(py)) for px, py in spliced.points]
+        self.route_yaws, self.route_gears = spliced.yaws, spliced.gears
+        self.reference = ReferencePath(self.route.points)
+        self.park_offsets = plan['offsets_in'] + [splice_offset(points, spliced)]
+        plan['spliced'], plan['maneuver'] = spliced, new
+        plan['vmax'] = self.parking_vmax(spliced)
+        plan['retries'] = plan.get('retries', 0) + 1
+        plan.pop('wall_shift', None)
+        self.get_logger().info(f'{mission.id}: 앞으로 나갔다가 다시 후진 ({plan["retries"]}번째)')
+        self.publish_parking_markers()
+        return True
 
     def replan_exit(self, p, yaw):
         """평행주차: 칸에 선 실제 자세에서 나가는 전진 S자를 다시 만들어 경로의 마지막 구간을 바꿈."""
@@ -888,6 +1021,11 @@ class Planner(Node):
     def on_odom(self, m):
         if m.header.frame_id == 'map':
             self.odom = m
+            stamp = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+            if abs(m.twist.twist.linear.x) > 0.05:
+                self.park_still_since = None
+            elif getattr(self, 'park_still_since', None) is None:
+                self.park_still_since = stamp
 
     def on_obstacles(self, m):
         stamp = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
@@ -978,6 +1116,8 @@ class Planner(Node):
                 detour, reason = plan_detour(self.reference, s_ego, d_ego, slope, obs_s, obs_d, mission, zone[1],
                                              replace(self.cfg, max_lateral_accel=self.detour_lateral_accel,
                                                      cruise_speed=min(self.cruise_speed, self.detour_max_speed)),
+                                             single_speed=min(self.cruise_speed, self.detour_single_speed),
+                                             free_speed=self.cruise_speed,
                                              margins=margins, check=check)
                 if detour is not None:
                     cap = caps[detour.margin] if check else self.cfg.creep_speed
