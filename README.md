@@ -15,10 +15,10 @@ cd heven-hackathon-2026
 ./run.sh            # macOS·Ubuntu  (Windows PowerShell: .\run.ps1)
 ```
 
-3. 브라우저에 시뮬레이터 화면 **http://localhost:8080** 이 열리고, 작업 폴더 `~/heven_hackathon_2026`에 기본 코드가 들어갑니다.
+3. 브라우저에 시뮬레이터 화면 **http://localhost:8080** 이 열리고, 작업 폴더 `~/heven_hackathon_2026_ws`에 기본 코드가 들어갑니다.
 
 ```
-~/heven_hackathon_2026/
+~/heven_hackathon_2026_ws/
 ├── mit_ws/      MIT 코드 (컨테이너 /mit_ws), 기본 코드 hk_mit
 ├── morai_ws/    MORAI 코드 (컨테이너 /morai_ws, 빌드 확인용), 기본 코드 hk_morai
 └── data/        결과 기록 (컨테이너 /data)

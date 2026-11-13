@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Name = "heven"
 $Image = if ($env:HEVEN_IMAGE) { $env:HEVEN_IMAGE } else { "ghcr.io/skku-heven/heven-hackathon-2026:2026" }
-$HomeDir = if ($env:HEVEN_HOME) { $env:HEVEN_HOME } else { Join-Path $env:USERPROFILE "heven_hackathon_2026" }   # mit_ws (/mit_ws), morai_ws (/morai_ws), data (/data)
+$HomeDir = if ($env:HEVEN_HOME) { $env:HEVEN_HOME } else { Join-Path $env:USERPROFILE "heven_hackathon_2026_ws" }   # mit_ws (/mit_ws), morai_ws (/morai_ws), data (/data)
 $Port = if ($env:HEVEN_PORT) { $env:HEVEN_PORT } else { "8080" }
 $DesktopPort = if ($env:HEVEN_DESKTOP_PORT) { $env:HEVEN_DESKTOP_PORT } else { "6080" }
 

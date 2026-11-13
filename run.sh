@@ -10,7 +10,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 NAME=heven
 IMAGE="${HEVEN_IMAGE:-ghcr.io/skku-heven/heven-hackathon-2026:2026}"
-HOME_DIR="${HEVEN_HOME:-$HOME/heven_hackathon_2026}"   # mit_ws (/mit_ws), morai_ws (/morai_ws), data (/data)
+HOME_DIR="${HEVEN_HOME:-$HOME/heven_hackathon_2026_ws}"   # mit_ws (/mit_ws), morai_ws (/morai_ws), data (/data)
 PORT="${HEVEN_PORT:-8080}"
 DESKTOP_PORT="${HEVEN_DESKTOP_PORT:-6080}"
 
