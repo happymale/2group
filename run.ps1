@@ -46,11 +46,20 @@ function Prepare-Dirs {  # the base code into each empty workspace: hk_mit -> mi
       if (Test-Path $usb) {
         Copy-Item -Recurse -Force $usb $src
       } else {                             # the base code inside the image
-        docker run --rm -v "${wsDir}:/w" --entrypoint cp $Image -R "/opt/heven/src/$pkg" /w/src/
+        docker run --rm -u heven -v "${wsDir}:/w" --entrypoint cp $Image -R "/opt/heven/src/$pkg" /w/src/
       }
       Write-Host "기본 코드 $pkg 를 $src 에 복사했습니다."
     }
   }
+}
+
+function Screen-Url {  # the screen opens only with the token this container made
+  for ($i = 0; $i -lt 30; $i++) {
+    $t = cmd /d /c "docker exec $Name cat /run/heven/web-token 2>nul"
+    if ($t) { return "http://localhost:${Port}/?t=$(([string]$t).Trim())" }
+    Start-Sleep 1
+  }
+  return "http://localhost:$Port"
 }
 
 function Is-Running { [bool](docker ps --format "{{.Names}}" | Where-Object { $_ -eq $Name }) }
@@ -62,8 +71,8 @@ function Start-Sim {
     docker run -d --name $Name -p "127.0.0.1:${Port}:8080" -p "127.0.0.1:${DesktopPort}:6080" `
       -v "${HomeDir}\mit_ws:/mit_ws" -v "${HomeDir}\morai_ws:/morai_ws" -v "${HomeDir}\data:/data" $Image | Out-Null
   }
-  $url = "http://localhost:$Port"
-  Write-Host "시뮬레이터 화면: $url"
+  $url = Screen-Url
+  Write-Host "시뮬레이터 화면: $url  (창을 닫았으면 이 명령을 다시 실행)"
   Write-Host "터미널: .\run.ps1 shell   데스크톱(RViz 등): .\run.ps1 desktop"
   Write-Host "작업 폴더: $HomeDir\mit_ws (컨테이너의 /mit_ws, MIT)  $HomeDir\morai_ws (/morai_ws, MORAI는 빌드만 확인)"
   Start-Sleep 3
@@ -72,11 +81,11 @@ function Start-Sim {
 
 switch ($Action) {
   "start"   { Start-Sim }
-  "shell"   { Need-Docker; docker exec -it $Name bash }
+  "shell"   { Need-Docker; docker exec -it -u heven -e HOME=/mit_ws/.home -e ROS_LOG_DIR=/mit_ws/.home/ros_log $Name bash -c 'mkdir -p $HOME; exec bash' }
   "desktop" {
     Need-Docker
     if (-not (Is-Running)) { Start-Sim }
-    docker exec $Name heven-desktop
+    docker exec -u heven -e HOME=/mit_ws/.home -e ROS_LOG_DIR=/mit_ws/.home/ros_log $Name bash -c 'mkdir -p $HOME; heven-desktop'
     Start-Sleep 2
     Start-Process "http://localhost:${DesktopPort}/vnc.html?autoconnect=1&resize=scale&view_only=0"
   }

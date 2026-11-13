@@ -41,8 +41,20 @@ get_image() {
   fi
 }
 
-shell_user() {  # Linux: run as the host user so files in the workspace stay editable on the host
-  if [ "$(uname -s)" = Linux ]; then echo "-u $(id -u):$(id -g) -e HOME=/mit_ws/.home -e ROS_LOG_DIR=/mit_ws/.home/ros_log"; fi
+shell_user() {  # shells, the desktop and the base-code copy: the host user on Linux (files stay editable on the
+  # host), the participant user heven elsewhere (never root)
+  if [ "$(uname -s)" = Linux ]; then echo "-u $(id -u):$(id -g) -e HOME=/mit_ws/.home -e ROS_LOG_DIR=/mit_ws/.home/ros_log"
+  else echo "-u heven -e HOME=/mit_ws/.home -e ROS_LOG_DIR=/mit_ws/.home/ros_log"; fi
+}
+
+screen_url() {  # the screen opens only with the token this container made
+  local t="" i
+  for i in $(seq 30); do
+    t="$(docker exec "$NAME" cat /run/heven/web-token 2>/dev/null || true)"
+    [ -n "$t" ] && break
+    sleep 1
+  done
+  if [ -n "$t" ]; then echo "http://localhost:$PORT/?t=$t"; else echo "http://localhost:$PORT"; fi
 }
 
 prepare_dirs() {  # the base code into each empty workspace: hk_mit -> mit_ws, hk_morai -> morai_ws
@@ -74,8 +86,9 @@ start() {
     docker run -d --name "$NAME" -p "127.0.0.1:$PORT:8080" -p "127.0.0.1:$DESKTOP_PORT:6080" $ids \
       -v "$HOME_DIR/mit_ws:/mit_ws" -v "$HOME_DIR/morai_ws:/morai_ws" -v "$HOME_DIR/data:/data" "$IMAGE" >/dev/null
   fi
-  local url="http://localhost:$PORT"
-  echo "시뮬레이터 화면: $url"
+  local url
+  url="$(screen_url)"
+  echo "시뮬레이터 화면: $url  (창을 닫았으면 이 명령을 다시 실행)"
   echo "터미널: $0 shell   데스크톱(RViz 등): $0 desktop"
   echo "작업 폴더: $HOME_DIR/mit_ws (컨테이너의 /mit_ws, MIT)  $HOME_DIR/morai_ws (/morai_ws, MORAI는 빌드만 확인)"
   sleep 3
