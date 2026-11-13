@@ -2,16 +2,159 @@
 hk_mit_localization:
   ros__parameters:
     course_json: ""               # 출발·복귀 자세와 지도 원점
+    # EKF(x, y, yaw, 자이로 바이어스, GNSS 다중경로 바이어스, 바퀴 배율). 나머지 값은 localization.py PARAMS 기본값
+    gnss_gate: 4.0                # 마할라노비스 거리가 이보다 크면 그 GNSS는 버림
+    gnss_reset_m: 3.0             # 이보다 크게 어긋난 GNSS가 gnss_reset_count번 이어지면 GNSS로 다시 맞춤
 hk_mit_planner:
   ros__parameters:
     ahead_m: 30.0                 # 차 앞으로 내보낼 경로 길이 (m)
     behind_m: 2.0                 # 차 뒤로 남길 경로 길이 (m)
     route_csv: ""                 # 전역 경로 (0.5 m 간격)
+    avoidance_enabled: true
+    path_step: 0.2                # 후보 경로 충돌 검사 간격 (m)
+    road_half_width: 3.75          # 기준 경로 중심의 가정한 도로 반폭. 실제 경계는 코스 파일에 없음
+    safety_margin: 0.35
+    surface_padding: 0.25         # 관측 표면의 불확실성 여유 (m)
+    vehicle_length: 4.635
+    vehicle_width: 1.892
+    rear_overhang: 0.79
+    wheelbase: 3.0
+    max_steer_deg: 35.4
+    max_lateral_accel: 3.0        # 회피 경로 횡가속도 한계 → 곡률 속력 sqrt(a/κ)를 감속 한계로 미리 반영
+    cruise_speed: 14.0            # 직선 최고 속력. launch의 target_speed:=… 가 덮어씀 (launch 기본값도 14.0)
+    corner_lateral_accel: 8.0     # 곡선 횡가속도 한계 → 곡선 속력 sqrt(a/κ). 옵션 없음 실측: 8 → S자 여유 0.45 m, 9 → 조향 포화로 감점(cp4 S자)
+    profile_accel: 3.5            # 속도 프로파일 가속 한계 (m/s², accel=1 실측 약 4)
+    profile_decel: 6.0            # 곡선 앞 감속 한계 (m/s², brake=1 실측 약 8.6)
+    speed_preview_s: 0.6          # 이 시간 앞 구간의 제한까지 미리 반영
+    # 구간별 속력 상한 [시작 s, 끝 s, 상한 m/s, ...]. s는 route.csv 경로 거리(m):
+    # cp1 13, cp2 58, cp3 166.5, cp4 192, cp5 275.4, cp6 405.4, cp7 465.4, cp8 494.9, cp9 529.9, cp10 571.9, cp11 655.9, 결승 670.9
+    speed_zones: [0.0, 0.0, 100.0]
+    avoidance_speed: 10.0         # (Frenet 대비) 회피 중 속력 상한이자 옆 이동·복귀 길이 기준 속력
+    tight_speed: 3.0              # 여유를 줄여 찾은 경로의 속력 상한
+    return_time: 2.0              # 복귀 길이 = avoidance_speed × return_time (구간 끝 전에 끝나게 줄임)
+    return_gap: 1.0               # 마지막 장애물 뒤 이만큼 더 간 뒤 복귀 (상자 깊이 2 m는 이미 채움)
+    detour_enabled: true          # 장애물 구간: LiDAR로 모은 장애물(2 × 4.3 m 상자, 한쪽 벽에 붙음)로 전역 경로 우회 (detour.py)
+    detour_lateral_accel: 2.5     # 우회 경로 속력용 횡가속도
+    detour_slow_speed: 6.0        # margin 반으로 줄인 우회 경로의 속력 상한 (실측 여유 0.12~0.39 m, 4 m/s와 같은 수준)
+    detour_max_speed: 6.5         # 장애물 여럿(지그재그)을 지나는 동안의 속력 상한. 접근·복귀는 곡률·감속 한계만
+    detour_single_speed: 9.0      # 장애물 하나(한 번 비킴)를 지나는 동안의 속력 상한
+    avoidance_zone_before: 25.0   # 장애물 구간 25 m 앞부터 점을 모으고 우회 경로를 만듦 (14 m/s 접근에서 옆 이동 거리 확보)
+    lateral_offsets: [-2.3, -2.0, -1.6, -1.0, 0.0, 1.0, 1.6, 2.0, 2.3]
+    transition_times: [1.2, 2.0, 3.0]
+    obstacle_timeout: 1.0         # 정지 장애물은 map 좌표로 1 s 지나도 유효. CPU 부하로 한 스캔이 늦어도 멈추지 않게
+    odom_timeout: 0.5 
+    clock_tolerance: 0.05          # 노드 간 /clock 전달 순서 차이 (s)
+    # 회전교차로 (roundabout.py). route.csv의 진입·진출 꺾임(R≈2.5)을 접선 원호로 바꾸고 NPC에 양보·차간 유지
+    roundabout_enabled: true
+    roundabout_entry_radius: 7.25  # 진입 원호 반지름 (뒤차축, m). 7~7.5에서 차체 통로 여유 최대(약 +0.4 m, 정확 추종 시)
+    roundabout_exit_radius: 7.25   # 진출 원호 반지름 (m)
+    roundabout_ring_offset: 0.0    # 우리 링 반지름 = NPC 반지름(11 m) + 이 값
+    roundabout_smooth_m: 2.5       # 곡률이 바뀌는 곳을 둥글리는 길이 (m, 조향 속도)
+    roundabout_cut_bias: 1.8       # 원호에서 안쪽으로 파고드는 것 보상: 제어 경로를 바깥으로 이 값 × 곡률 (R 7.25 → 0.25 m)
+    roundabout_speed: 4.0          # 정지 위치 ~ 진출 직선 속력 상한 (m/s). NPC(약 3.6 m/s)보다 빠르게
+    roundabout_stop_radius: 13.5   # 양보 정지 위치: 앞 범퍼가 링 중심에서 이 거리 (NPC 바깥 면 약 11.95 m)
+    npc_rate: 0.33                 # NPC 각속도 사전값 (rad/s, 관측 0.32~0.37, 반시계)
+    npc_track_timeout: 2.5         # 관측 없이 NPC 추적을 유지하는 시간 (s)
+    npc_gap_behind: 7.0            # 합류 순간 뒤 NPC 중심이 합류점에서 이만큼(호 m) 뒤에 있어야 진입
+    npc_gap_ahead: 7.5             # 합류 순간 앞 NPC 중심이 합류점에서 이만큼 앞에 있어야 진입
+    npc_follow_gap: 9.0            # 앞 NPC 중심 ~ 우리 뒤차축 최소 거리 (경로·호 m, 범퍼 간격 약 2.9 m)
+    merge_accel: 1.5               # 합류 시각 예측 가속도 (m/s²)
+    yield_decel: 2.0               # 정지 위치에 서는 감속도 (m/s²)
+    yield_timeout: 20.0            # 이만큼 서 있어도 틈이 없으면 진입 (s, 허상 추적·인지 끊김으로 영영 서는 것 방지)
+    collision_zones: [-1.0]        # 경로 위 물체 속력 제한 구간 [s0, s1, ...]. -1 = 회전교차로 정지 위치 30 m 앞 ~ 진출 10 m 뒤
+    collision_min_points: 3        # 이보다 적은 점의 군집은 무시 (LiDAR 잡음)
+    collision_decel: 3.0           # 경로 위 물체 앞 감속도 (m/s²)
+    collision_stop_gap: 3.0        # 물체와 앞 범퍼 사이에 남길 거리 (m)
+    collision_half_width: 1.2      # 경로에서 이 거리 안의 관측점을 경로 위 물체로 봄 (m)
+    collision_horizon: 25.0        # 이만큼 앞까지 검사 (m)
+    # 주차 (parking.py). 존에 다가가며 칸 쪽 벽 선의 입구(평행: 8 m 홈, 후면: 5 m 통로)를 LiDAR로 찾아 seed slide를 구하고,
+    # 전진 → 정지 → 후진 → 3 s 유지 → 전진 복귀 동작을 전역 경로에 끼움. /hk/plan/gear: 0 일반, +1 주차 전진, -1 후진
+    parking_enabled: true
+    parking_mission_types: ["parallel_parking", "rear_parking"]
+    parking_speed: 6.0             # 주차 전진 구간 속력 상한 (m/s)
+    parking_reverse_speed: 4.5     # 후진 속력 상한 (m/s)
+    parking_lateral_accel: 2.2     # 주차 원호 횡가속도 한계 (m/s², R 4.4 → 2.8 m/s, 조향 지연 250 ms 대비. 2.2는 감점)
+    parking_approach_decel: 2.0    # 원호 속력 상한까지 미리 줄이는 감속도 (m/s²). 1.8이면 PI 지연으로 원호 진입이 빨라 감점
+    parking_stop_decel: 3.0        # 정지 지점 앞 감속도 (m/s², control park_stop_decel과 같게)
+    parking_stop_tolerance: 0.2    # 정지 지점까지 남은 거리가 이보다 작고 멈췄으면 다음 구간 (m)
+    parking_accept_short: 0.6      # 이 안에서 parking_short_wait(s) 동안 멈춰 있으면 도착으로 봄 (m)
+    parking_short_wait: 1.5
+    parking_check_margin: 0.05     # 유지 전 자체 검사: 추정 차체 꼭짓점이 칸 안쪽 이 거리(m) 이상이어야 (아니면 다시 들어감)
+    parking_check_yaw_deg: 12.0    # 자체 검사 방향 오차 한계 (도, 규정 20°)
+    parking_max_retries: 2.0       # 자체 검사 실패 시 앞으로 나갔다 다시 후진하는 최대 횟수
+    parking_retry_pull: 4.0        # 후면: 다시 들어가기 전 앞으로 갈 거리 (m)
+    parking_reverse_lateral_accel: 1.2  # 후진 원호 횡가속도 한계 (m/s², R 4.4 → 2.3 m/s). 2.2이면 평행 후진이 1.4 m 깊이 들어간 적 있음
+    parking_hold_s: 3.1            # 칸 안 유지 시간 (규정: 0.05 m/s 이하 3 s)
+    parking_stopped_speed: 0.05    # 이보다 느리면 멈춤 (m/s)
+    parking_detect_range: 45.0     # 존 중심까지 도로 방향 거리가 이 안이면 관측점을 모으고 칸을 찾음 (m)
+    parking_commit_distance: 8.0   # 칸을 확정하기 전에는 (존 중심 - slide 범위 - 이 거리)에 서서 기다림 (m)
+    parking_commit_decel: 2.5
+    parking_stable_scans: 3.0      # 연속 이만큼 같은 slide(± parking_stable_tol m)면 확정
+    parking_stable_tol: 0.3
+    parking_refine_until: 4.0      # 동작을 넣은 뒤에도 동작 시작 이만큼(m) 전까지 칸을 다시 찾아, slide가
+    parking_refine_tol: 0.08       # 이만큼(m) 넘게 바뀌면 동작을 다시 만들어 넣음 (멀리서 본 입구 끝은 덜 정확)
+    parking_clearance: 0.3         # 계획 경로 차체 ~ 벽 모형·관측점 최소 거리 (m). 아래 기본 동작의 기하 여유: 평행 0.5, 후면 0.4
+    parking_slot_margin: 0.15      # 계획 최종 차체가 칸 경계 안쪽으로 들어온 거리 (규정 0.05 m)
+    parking_radius_margin: 1.05    # 최소 회전반경(4.22 m) × 이 값 이상의 원호만
+    parking_voxel: 0.1             # 관측점 누적 격자 (m)
+    parking_point_window: 3.0      # 칸 검출에 최근 이 시간(s)에 본 점만 씀 (위치 추정 오차가 천천히 바뀌므로)
+    # 칸 좌표계(원점 = 검출한 칸 중심, x = 칸 yaw = 도로 진행 방향, y = 왼쪽) 자유 공간 직사각형 [x0, x1, y0, y1, ...].
+    # 도로 띠(도로 중심 ± 관측 벽 거리)는 자동으로 더함. 탐색 주행에서 잰 구조 (seed와 무관, 칸과 함께 밀림)
+    parallel_opening_length: 8.0   # 칸 쪽 벽 입구 길이 (m). 입구 중심 = 먼 쪽 끝 - 길이/2 (가까운 모서리는 비스듬해 부정확). 0 = 양 끝 중심
+    rear_opening_length: 5.0
+    parallel_parking_free: [-4.0, 4.0, -2.05, 2.5]                          # 홈 8 × 4 m
+    rear_parking_free: [4.2, 9.2, -11.0, -2.0, -2.8, 16.2, -2.475, 2.525]   # 통로 5 m 폭, 방 19 × 5 m
+    # 평행주차 후보: 칸 5 m 앞(남쪽) 도로에서 정지 → 후진 S자(오른쪽·왼쪽 조향, 반지름 = 최소 × scale) → 칸 북쪽에 유지 → 전진 S자 복귀
+    parallel_radius_scales: [1.0, 1.1]
+    parallel_final_lateral: [0.6, 0.5]       # 최종 뒤차축: 칸 중심에서 도로 쪽으로 (m)
+    parallel_final_back: [1.1, 1.0, 1.2]     # 최종 차체 중심: 칸 중심에서 뒤(북)로 (m). 앞쪽 홈 모서리 여유 확보
+    parallel_start_lateral: [0.0, -0.5, 0.5] # 후진 시작점: 도로 중심에서 (+ 왼쪽, m)
+    parallel_exit_radius_scale: 1.0
+    # 후면주차 후보: 왼쪽 90° 원호로 통로 → 오른쪽 90°로 방에서 남쪽을 봄 → 정지 → 직진 후진 → 유지 → 전진 → 오른쪽 90° → 통로 → 왼쪽 90°
+    rear_entry_radius_scales: [1.13]         # 도로 → 통로 왼쪽 90° (R 5.0: 조향 88 %, 지연 여유)
+    rear_turn_radii: [4.7]                   # 방 안 오른쪽 90° 원호 반지름 (m)
+    rear_passage_offsets: [-0.5, -0.75]      # 통로 안 진입 선: 통로 중심에서 도로 방향(+ 앞) m
+    rear_final_lateral: -0.2                 # 최종 뒤차축: 칸 중심에서 왼쪽(+) m
+    rear_final_back: [0.05]                  # 최종 차체 중심: 칸 중심에서 앞(남)으로 m (뒤 벽 여유)
+    rear_exit_turn_radius_scale: 1.0
+    rear_exit_radius_scale: 1.0
+    rear_exit_passage_offset: -0.25
+    rear_back_wall_x: -2.8                   # 방 북쪽 벽 (칸 좌표계 x; 칸 끝 -2.7에서 0.1 m 뒤). 후진 중 이 벽을 스캔에서 직접 재서
+    parking_wall_search: 0.6                 # 정지 지점을 최대 ± 이 거리(m) 옮김 (위치 추정 오차를 벽 기준으로 보정)
+hk_mit_lidar_perception:
+  ros__parameters:
+    record_csv: false
+    csv_path: ""
+    jump_base: 0.3
+    jump_scale: 1.5
+    max_obstacle_range: 45.0       # ahead_m + 차체 앞 길이보다 크게 유지
+    scan_timeout: 0.35
+    max_invalid_fraction: 0.1
 hk_mit_control:
   ros__parameters:
-    target_speed: 5.0             # 목표 속력 (m/s)
-    k_stanley: 1.0                # Stanley: 옆으로 벗어난 거리에 대한 조향 세기
+    target_speed: 14.0            # 목표 속력 상한 (m/s). 실제 속력은 planner의 speed_limit을 따름
+    k_stanley: 1.5                # Stanley: 옆으로 벗어난 거리에 대한 조향 세기 (1.0이면 곡선 뒤쪽에서 0.5 m 바깥으로 밀림)
     k_soft: 1.0                   # Stanley: 저속에서 조향이 너무 세지지 않게 (m/s)
     kp: 0.5                       # 속력 P 이득
     ki: 0.05                      # 속력 I 이득
     brake_gain: 0.6               # 너무 빠를 때 제동 세기
+    latency_s: 0.1                # 이 시간 뒤 자세를 예측해 조향 (조향 지연 옵션이면 0.25~0.3)
+    k_curvature: 0.0              # 경로 곡률 피드포워드 비율 (Stanley 방향 오차가 이미 곡률을 반영하므로 0~0.3)
+    k_yaw_rate: 0.0               # 요레이트 감쇠 (고속 진동 시 0.05~0.1)
+    k_understeer: 0.016           # 언더스티어 피드포워드 (rad per m/s²): 바퀴각 += k·v²·κ(앞바퀴 축). 실측 횡가속도 4~7 m/s²에서 운동학 각보다 2~4° 더 필요
+    k_offset: 0.0                 # 곡선 바깥 목표 비율 (뒤차축이 안쪽을 파고드는 √(R²+L²)-R 의 몇 배를 앞바퀴 축에서 바깥으로, 0~1)
+    k_slope: 1.0                  # 경사 피드포워드 비율 (IMU 전후 가속도 - 속력 변화율, 1 = 그대로 보상, 0 = 끔)
+    slope_tau: 0.3                # 경사 추정 저역 통과 시간 상수 (s)
+    drive_accel: 4.0              # accel = 1 일 때 가속도 (m/s², 실측 약 4)
+    brake_decel: 8.5              # brake = 1 일 때 감속도 (m/s², 실측 약 8.6)
+    require_plan_speed: true
+    plan_timeout: 0.5
+    k_rev_heading: 1.5             # 후진(뒤차축 되먹임) 방향 오차 이득 (1/m)
+    k_rev_lateral: 1.0             # 후진 옆 오차 이득 (1/m²)
+    park_stop_decel: 3.0           # 주차 정지 지점 앞 감속도 (m/s², planner parking_stop_decel과 같게)
+    park_stop_tolerance: 0.1       # 정지 지점까지 이보다 가까우면 완전 제동 (m)
+    kp_park: 1.5                   # 주차 구간 속력 P 이득 (원호 앞 감속을 빨리 따르게)
+    gear_stop_speed: 0.05          # 이보다 느릴 때만 기어 변경 (m/s)
+    gear_settle_s: 0.15             # 기어 변경 뒤 제동하며 조향을 맞추는 시간 (s)
+    odom_timeout: 0.35
+    clock_tolerance: 0.05

@@ -1,0 +1,1655 @@
+diff -ruN a/hk_mit/README.md b/hk_mit/README.md
+--- a/hk_mit/README.md	2026-11-14 03:29:44.812483500 +0900
++++ b/hk_mit/README.md	2026-11-14 03:29:45.120642800 +0900
+@@ -97,6 +97,21 @@
+ 목표 속도 프로파일·제동거리 최적화와 노면·구동 지연을 포함한 동역학 계획도 범위 밖입니다.
+ 위치 추정은 기존 코드 그대로이므로 GPS 음영 구간의 위치 갱신 한계가 남아 있습니다.
+ 
++## 주차 (평행·후면, `hk_mit/parking.py`)
++
++전역 경로를 고쳐서 주차합니다. 켠 주차 미션(`/data/current/course.json` options)의 존에 다가가며
++칸 쪽 벽 선의 입구(평행: 8 × 4 m 홈, 후면: 폭 5 m 통로 → 19 × 5 m 방)를 LiDAR 누적점으로 찾아 seed slide를 구하고
++(입구 먼 쪽 끝 - 입구 길이/2, 동작 시작 4 m 전까지 계속 다시 찾음), 후보 동작(원호 반지름 ≥ 1.05 R_min)을
++칸 좌표계 자유 공간 모형·관측점에 대해 차체 검사한 뒤 경로에 끼웁니다.
++
++- 평행: 칸 5 m 앞에서 정지 → 후진 S자 → 3.2 s 유지 → (실제 선 자세에서 다시 만든) 전진 S자로 복귀
++- 후면: 왼쪽 90°로 통로 → 방에서 오른쪽 90° → 정지 → 직진 후진(방 북쪽 벽을 스캔에서 재서 정지 지점 보정) → 유지 → 전진 복귀
++- 경로 점마다 기어(+1/-1), 구간 끝 = 정지 지점. 지금 구간만 발행하고 가장 가까운 점 찾기도 구간 끝을 넘지 않음
++- `/hk/plan/gear` (`std_msgs/Int8`): 0 일반 주행, 부호 = 방향(+ 전진, - 후진), 크기 2 = 발행한 경로의 끝이 정지 지점
++- 제어: 기어는 0.05 m/s 아래에서만 바꾸고 그동안 제동하며 조향을 미리 맞춤. 후진은 뒤차축 되먹임(차 방향 + π),
++  주차 전진은 Stanley + 곡률 피드포워드, 정지 지점까지 √(2 a 남은 거리)로 감속
++- 성공 판정(규정·결과 JSON `missions`: pending → parked → done): 차체 네 꼭짓점 칸 안(0.05 m), 방향 ±20°, 0.05 m/s 이하 3 s
++
+ ## 검증
+ 
+ ```bash
+diff -ruN a/hk_mit/config/bringup.yaml b/hk_mit/config/bringup.yaml
+--- a/hk_mit/config/bringup.yaml	2026-11-14 03:29:44.737802200 +0900
++++ b/hk_mit/config/bringup.yaml	2026-11-14 03:29:44.924438400 +0900
+@@ -58,6 +58,55 @@
+     collision_stop_gap: 3.0        # 물체와 앞 범퍼 사이에 남길 거리 (m)
+     collision_half_width: 1.2      # 경로에서 이 거리 안의 관측점을 경로 위 물체로 봄 (m)
+     collision_horizon: 25.0        # 이만큼 앞까지 검사 (m)
++    # 주차 (parking.py). 존에 다가가며 칸 쪽 벽 선의 입구(평행: 8 m 홈, 후면: 5 m 통로)를 LiDAR로 찾아 seed slide를 구하고,
++    # 전진 → 정지 → 후진 → 3 s 유지 → 전진 복귀 동작을 전역 경로에 끼움. /hk/plan/gear: 0 일반, +1 주차 전진, -1 후진
++    parking_enabled: true
++    parking_mission_types: ["parallel_parking", "rear_parking"]
++    parking_speed: 6.0             # 주차 전진 구간 속력 상한 (m/s)
++    parking_reverse_speed: 3.5     # 후진 속력 상한 (m/s)
++    parking_lateral_accel: 2.2     # 주차 원호 횡가속도 한계 (m/s², R 4.4 → 2.8 m/s, 조향 지연 250 ms 대비. 2.2는 감점)
++    parking_approach_decel: 1.5    # 원호 속력 상한까지 미리 줄이는 감속도 (m/s²). 1.8이면 PI 지연으로 원호 진입이 빨라 감점
++    parking_stop_decel: 2.5        # 정지 지점 앞 감속도 (m/s², control park_stop_decel과 같게)
++    parking_stop_tolerance: 0.2    # 정지 지점까지 남은 거리가 이보다 작고 멈췄으면 다음 구간 (m)
++    parking_accept_short: 0.6      # 이 안에서 parking_short_wait(s) 동안 멈춰 있으면 도착으로 봄 (m)
++    parking_short_wait: 1.5
++    parking_hold_s: 3.1            # 칸 안 유지 시간 (규정: 0.05 m/s 이하 3 s)
++    parking_stopped_speed: 0.04    # 이보다 느리면 멈춤 (m/s)
++    parking_detect_range: 45.0     # 존 중심까지 도로 방향 거리가 이 안이면 관측점을 모으고 칸을 찾음 (m)
++    parking_commit_distance: 8.0   # 칸을 확정하기 전에는 (존 중심 - slide 범위 - 이 거리)에 서서 기다림 (m)
++    parking_commit_decel: 2.5
++    parking_stable_scans: 3.0      # 연속 이만큼 같은 slide(± parking_stable_tol m)면 확정
++    parking_stable_tol: 0.3
++    parking_refine_until: 4.0      # 동작을 넣은 뒤에도 동작 시작 이만큼(m) 전까지 칸을 다시 찾아, slide가
++    parking_refine_tol: 0.08       # 이만큼(m) 넘게 바뀌면 동작을 다시 만들어 넣음 (멀리서 본 입구 끝은 덜 정확)
++    parking_clearance: 0.3         # 계획 경로 차체 ~ 벽 모형·관측점 최소 거리 (m). 아래 기본 동작의 기하 여유: 평행 0.5, 후면 0.4
++    parking_slot_margin: 0.15      # 계획 최종 차체가 칸 경계 안쪽으로 들어온 거리 (규정 0.05 m)
++    parking_radius_margin: 1.05    # 최소 회전반경(4.22 m) × 이 값 이상의 원호만
++    parking_voxel: 0.1             # 관측점 누적 격자 (m)
++    parking_point_window: 3.0      # 칸 검출에 최근 이 시간(s)에 본 점만 씀 (위치 추정 오차가 천천히 바뀌므로)
++    # 칸 좌표계(원점 = 검출한 칸 중심, x = 칸 yaw = 도로 진행 방향, y = 왼쪽) 자유 공간 직사각형 [x0, x1, y0, y1, ...].
++    # 도로 띠(도로 중심 ± 관측 벽 거리)는 자동으로 더함. 탐색 주행에서 잰 구조 (seed와 무관, 칸과 함께 밀림)
++    parallel_opening_length: 8.0   # 칸 쪽 벽 입구 길이 (m). 입구 중심 = 먼 쪽 끝 - 길이/2 (가까운 모서리는 비스듬해 부정확). 0 = 양 끝 중심
++    rear_opening_length: 5.0
++    parallel_parking_free: [-4.0, 4.0, -2.05, 2.5]                          # 홈 8 × 4 m
++    rear_parking_free: [4.2, 9.2, -11.0, -2.0, -2.8, 16.2, -2.475, 2.525]   # 통로 5 m 폭, 방 19 × 5 m
++    # 평행주차 후보: 칸 5 m 앞(남쪽) 도로에서 정지 → 후진 S자(오른쪽·왼쪽 조향, 반지름 = 최소 × scale) → 칸 북쪽에 유지 → 전진 S자 복귀
++    parallel_radius_scales: [1.0, 1.1]
++    parallel_final_lateral: [0.6, 0.5]       # 최종 뒤차축: 칸 중심에서 도로 쪽으로 (m)
++    parallel_final_back: [1.1, 1.0, 1.2]     # 최종 차체 중심: 칸 중심에서 뒤(북)로 (m). 앞쪽 홈 모서리 여유 확보
++    parallel_start_lateral: [0.0, -0.5, 0.5] # 후진 시작점: 도로 중심에서 (+ 왼쪽, m)
++    parallel_exit_radius_scale: 1.0
++    # 후면주차 후보: 왼쪽 90° 원호로 통로 → 오른쪽 90°로 방에서 남쪽을 봄 → 정지 → 직진 후진 → 유지 → 전진 → 오른쪽 90° → 통로 → 왼쪽 90°
++    rear_entry_radius_scales: [1.13]         # 도로 → 통로 왼쪽 90° (R 5.0: 조향 88 %, 지연 여유)
++    rear_turn_radii: [4.7]                   # 방 안 오른쪽 90° 원호 반지름 (m)
++    rear_passage_offsets: [-0.5, -0.75]      # 통로 안 진입 선: 통로 중심에서 도로 방향(+ 앞) m
++    rear_final_lateral: -0.2                 # 최종 뒤차축: 칸 중심에서 왼쪽(+) m
++    rear_final_back: [0.05]                  # 최종 차체 중심: 칸 중심에서 앞(남)으로 m (뒤 벽 여유)
++    rear_exit_turn_radius_scale: 1.0
++    rear_exit_radius_scale: 1.0
++    rear_exit_passage_offset: -0.25
++    rear_back_wall_x: -2.8                   # 방 북쪽 벽 (칸 좌표계 x; 칸 끝 -2.7에서 0.1 m 뒤). 후진 중 이 벽을 스캔에서 직접 재서
++    parking_wall_search: 0.6                 # 정지 지점을 최대 ± 이 거리(m) 옮김 (위치 추정 오차를 벽 기준으로 보정)
+ hk_mit_lidar_perception:
+   ros__parameters:
+     record_csv: false
+@@ -86,5 +135,12 @@
+     brake_decel: 8.5              # brake = 1 일 때 감속도 (m/s², 실측 약 8.6)
+     require_plan_speed: true
+     plan_timeout: 0.5
++    k_rev_heading: 1.5             # 후진(뒤차축 되먹임) 방향 오차 이득 (1/m)
++    k_rev_lateral: 1.0             # 후진 옆 오차 이득 (1/m²)
++    park_stop_decel: 2.5           # 주차 정지 지점 앞 감속도 (m/s², planner parking_stop_decel과 같게)
++    park_stop_tolerance: 0.1       # 정지 지점까지 이보다 가까우면 완전 제동 (m)
++    kp_park: 1.0                   # 주차 구간 속력 P 이득 (원호 앞 감속을 빨리 따르게)
++    gear_stop_speed: 0.05          # 이보다 느릴 때만 기어 변경 (m/s)
++    gear_settle_s: 0.2             # 기어 변경 뒤 제동하며 조향을 맞추는 시간 (s)
+     odom_timeout: 0.35
+     clock_tolerance: 0.05
+diff -ruN a/hk_mit/hk_mit/control.py b/hk_mit/hk_mit/control.py
+--- a/hk_mit/hk_mit/control.py	2026-11-14 03:29:44.695920900 +0900
++++ b/hk_mit/hk_mit/control.py	2026-11-14 03:29:45.047199200 +0900
+@@ -13,6 +13,12 @@
+ 조향은 Stanley, 속력은 PI 제어입니다. planner의 /hk/plan/speed_limit을 상한으로
+ 적용하며 빈 경로·속도 제한 0·오래된 계획에는 제동합니다. 경사는 IMU 전후 가속도 - 바퀴 속력 변화율로
+ 추정해 피드포워드로 보상합니다(k_slope, 0 = 끔).
++
++주차 (planner의 /hk/plan/gear, std_msgs/Int8): 0 = 일반 주행(기존과 같음), 부호 = 주차 구간 방향(+ 전진, - 후진),
++크기 1 = 경로가 이어짐, 2 = 경로 끝이 정지 지점(남은 거리로 속력을 줄여 그 점에 섬, 50 Hz).
++주차 전진은 Stanley + 곡률 피드포워드(경로는 뒤차축 설계 경로의 앞바퀴 축 궤적). 기어는 거의 멈췄을 때만
++바꾸고(바꾸는 동안 제동하며 새 방향의 조향을 미리 맞춤), 후진은 뒤차축 되먹임(rear wheel feedback, 차 방향 + π)으로
++따라갑니다.
+ """
+ from collections import deque
+ import math
+@@ -24,7 +30,7 @@
+ from geometry_msgs.msg import TwistStamped
+ from nav_msgs.msg import Odometry, Path
+ from sensor_msgs.msg import Imu
+-from std_msgs.msg import Float32
++from std_msgs.msg import Float32, Int8
+ from hk_interfaces.msg import CtrlCmd
+ 
+ from .sim_events import SimEvents
+@@ -50,6 +56,13 @@
+     'drive_accel': 4.0,    # accel = 1 일 때 가속도 (m/s², 저속 실측 약 4)
+     'brake_decel': 8.5,    # brake = 1 일 때 감속도 (m/s², 실측 약 8.6)
+     'plan_timeout': 0.5,   # 경로·계획 속도 제한이 끊기면 제동 (s)
++    'k_rev_heading': 1.5,          # 후진 뒤차축 되먹임: 방향 오차 이득 (1/m)
++    'k_rev_lateral': 1.0,          # 후진 뒤차축 되먹임: 옆 오차 이득 (1/m²)
++    'park_stop_decel': 1.2,        # 주차 정지 지점 앞 감속도 (m/s²): 속력 ≤ √(2 a 남은 거리)
++    'park_stop_tolerance': 0.1,    # 정지 지점까지 이보다 가까우면 완전히 제동 (m)
++    'kp_park': 1.0,                # 주차 구간 속력 P 이득 (원호 앞 감속을 빨리 따르게)
++    'gear_stop_speed': 0.05,       # 이보다 느릴 때만 기어를 바꿈 (m/s, 시뮬레이터는 움직이는 중 기어 변경을 무시)
++    'gear_settle_s': 0.4,          # 기어를 바꾼 뒤 이 시간 동안 제동하며 조향을 맞춤 (s)
+     'odom_timeout': 0.35,
+     'clock_tolerance': 0.05,
+     # 출발 보조: 출발(cp0) 직후 위치·경로·계획이 아직 준비되지 않았으면 route.csv 첫 직선(-3 → 55 m, 방향 0)을
+@@ -91,6 +104,10 @@
+         self.create_subscription(Odometry, '/hk/local/odom', self.on_odom, 1)
+         self.create_subscription(Path, '/hk/plan/local_path', self.on_path, 1)
+         self.create_subscription(Float32, '/hk/plan/speed_limit', self.on_speed_limit, 1)
++        self.plan_gear, self.gear_stamp = 0, None          # planner가 정한 주행 방식 (0, +1, -1)
++        self.gear = CtrlCmd.GEAR_DRIVE                     # 지금 보내는 기어
++        self.gear_since = -1e9
++        self.create_subscription(Int8, '/hk/plan/gear', self.on_gear, 1)
+         self.imu_ax = None
+         self.create_subscription(Imu, '/hk/sensors/imu/data', self.on_imu, qos_profile_sensor_data)
+         self.create_subscription(TwistStamped, '/hk/sensors/wheel_encoder/speed', self.on_wheel, qos_profile_sensor_data)
+@@ -100,6 +117,7 @@
+     # ---- 시작·복귀 -----------------------------------------------------------------------------------
+     def on_reset(self, checkpoint, reload):
+         self.reset_control()
++        self.gear, self.gear_since, self.plan_gear, self.gear_stamp = CtrlCmd.GEAR_DRIVE, -1e9, 0, None
+         self.odom = self.path = None
+         self.path_stamp = self.plan_speed_limit = self.speed_limit_stamp = None
+         self.reset_time = self.now()
+@@ -176,6 +194,16 @@
+         self.plan_speed_limit = m.data if math.isfinite(m.data) and m.data >= 0 else 0.0
+         self.speed_limit_stamp = self.now()
+ 
++    def on_gear(self, m):
++        self.plan_gear = int(max(-2, min(2, m.data)))
++        self.gear_stamp = self.now()
++
++    def mode(self):
++        """planner의 주행 방식 (오래됐으면 0 = 일반 주행)."""
++        if self.gear_stamp is None or not 0 <= self.now() - self.gear_stamp <= self.plan_timeout:
++            return 0
++        return self.plan_gear
++
+     def nearest(self, x, y):
+         return self.path[self.nearest_index(x, y)]
+ 
+@@ -247,9 +275,28 @@
+         return True
+ 
+     def drive(self):
++        mode = self.mode()
++        stop_at_end = abs(mode) == 2
++        mode = (mode > 0) - (mode < 0)                 # 방향: +1 전진, -1 후진, 0 일반
++        want = CtrlCmd.GEAR_REVERSE if mode < 0 else CtrlCmd.GEAR_DRIVE
++        if want != self.gear:
++            # 기어 전환: 멈출 때까지 제동하고, 멈추면 바꿈. 그동안 새 방향의 조향을 미리 냄
++            steer = self.parking_steer(mode) if self.path else 0.0
++            if abs(self.speed) < self.gear_stop_speed:
++                self.gear, self.gear_since = want, self.now()
++            self.reset_control()
++            self.last_steer = steer
++            return 0.0, 1.0, steer
++        if mode != 0 and self.now() - self.gear_since < self.gear_settle_s and self.path:
++            steer = self.parking_steer(mode)
++            self.reset_control()
++            self.last_steer = steer
++            return 0.0, 1.0, steer
+         if not self.path or (self.require_plan_speed and (self.plan_speed_limit is None or self.plan_speed_limit <= 0)):
+             self.reset_control()
+             return 0.0, 1.0, 0.0
++        if mode != 0:
++            return self.drive_parking(mode, stop_at_end)
+         # 0) 지연 보상: 지금 낸 조향이 먹힐 때(latency_s 뒤)의 자세를, 그 사이에 바퀴에 차례로 닿을
+         #    지난 조향 명령들로 예측합니다. 직전 조향 하나를 latency_s 내내 쓰면 예측이 마지막 명령에
+         #    너무 민감해져(이득 v·latency/L) 회피 경로처럼 휘는 곳에서 조향이 ±1로 떨립니다.
+@@ -315,11 +362,80 @@
+             return min(u, 1.0), 0.0, steer          # accel, brake, steer
+         return 0.0, min(-u * self.brake_gain, 1.0), steer
+ 
++    # ---- 주차 (전진·후진, 경로 끝에서 정지) ----------------------------------------------------------------------
++    def predicted_pose(self):
++        """지연 보상한 뒤차축 자세 (drive()와 같은 방법, 후진이면 속력이 음수)."""
++        x, y, yaw = self.x, self.y, self.yaw
++        history = list(self.steer_history) or [self.last_steer]
++        dt = self.latency_s / len(history)
++        for past in history:
++            x += self.speed * math.cos(yaw) * dt
++            y += self.speed * math.sin(yaw) * dt
++            yaw += self.speed * math.tan(past * MAX_STEER) / WHEELBASE * dt
++        return x, y, yaw
++
++    def parking_steer(self, mode):
++        """주차 구간 조향. 전진은 기존 Stanley(앞바퀴 축), 후진은 뒤차축 pure pursuit (차 방향 + π)."""
++        x, y, yaw = self.predicted_pose()
++        if mode >= 0:
++            fx, fy = x + WHEELBASE * math.cos(yaw), y + WHEELBASE * math.sin(yaw)
++            k = self.nearest_index(fx, fy)
++            px, py, path_yaw = self.path[k]
++            heading_error = angle_diff(path_yaw, yaw)
++            cross_error = -math.sin(path_yaw) * (px - fx) + math.cos(path_yaw) * (py - fy)
++            wheel = heading_error + math.atan2(self.k_stanley * cross_error, self.k_soft + abs(self.speed))
++            if mode > 0:
++                # 곡률 피드포워드: 앞바퀴 축 궤적의 (차 방향 변화 / 거리) = κ / √(1 + L²κ²) → 뒤차축 곡률 κ
++                kf = clamp(self.path_curvature(k, span=1.0), -0.99 / WHEELBASE, 0.99 / WHEELBASE)
++                wheel += math.atan(WHEELBASE * kf / math.sqrt(1.0 - (WHEELBASE * kf) ** 2))
++            return clamp(wheel / MAX_STEER, -1.0, 1.0)
++        # 후진: 뒤로 가는 가상 차(방향 ψ' = yaw + π, 조향 δ' = -δ)에 뒤차축 되먹임(rear wheel feedback) 적용
++        #   ω' = v κ cos e_ψ / (1 - κ e) - k_ψ v e_ψ - k_e v e sin(e_ψ)/e_ψ,  δ' = atan(L ω' / v)
++        k = self.nearest_index(x, y)
++        px, py, path_yaw = self.path[k]
++        travel = path_yaw + math.pi
++        e = -math.sin(travel) * (x - px) + math.cos(travel) * (y - py)        # 경로 왼쪽이면 +
++        e_yaw = angle_diff(yaw + math.pi, travel)
++        kappa = self.path_curvature(k, span=1.0)          # 차 방향 변화 / 거리 = 진행 방향 기준 곡률과 같음
++        v = max(abs(self.speed), 0.5)
++        sinc = math.sin(e_yaw) / e_yaw if abs(e_yaw) > 1e-4 else 1.0
++        omega = (v * kappa * math.cos(e_yaw) / max(1.0 - kappa * e, 0.2)
++                 - self.k_rev_heading * v * e_yaw - self.k_rev_lateral * v * sinc * e)
++        return clamp(-math.atan(WHEELBASE * omega / v) / MAX_STEER, -1.0, 1.0)
++
++    def remaining(self, mode):
++        """경로 끝(정지 지점)까지 진행 방향으로 남은 거리 (m). 전진은 앞바퀴 축, 후진은 뒤차축 기준."""
++        ex, ey, eyaw = self.path[-1]
++        if mode > 0:
++            rx, ry, direction = self.x + WHEELBASE * math.cos(self.yaw), self.y + WHEELBASE * math.sin(self.yaw), eyaw
++        else:
++            rx, ry, direction = self.x, self.y, eyaw + math.pi
++        return (ex - rx) * math.cos(direction) + (ey - ry) * math.sin(direction)
++
++    def drive_parking(self, mode, stop_at_end):
++        steer = self.parking_steer(mode)
++        self.last_steer = steer
++        self.steer_history.append(steer)
++        target = min(self.target_speed, self.plan_speed_limit if self.require_plan_speed else self.target_speed)
++        if stop_at_end:
++            rem = self.remaining(mode)
++            if rem < self.park_stop_tolerance:
++                self.reset_control()
++                return 0.0, 1.0, steer
++            target = min(target, math.sqrt(2 * self.park_stop_decel * max(0.0, rem - 0.5 * self.park_stop_tolerance)))
++        # 속력 PI (진행 방향 속력, 후진이면 -속력). 경사 보상은 전진만
++        error = target - self.speed * mode
++        self.speed_error_sum = clamp(self.speed_error_sum + error * self.dt, -5.0, 5.0)
++        u = self.kp_park * error + self.ki * self.speed_error_sum
++        if u >= 0:
++            return min(u, 1.0), 0.0, steer
++        return 0.0, min(-u * self.brake_gain, 1.0), steer
++
+     def send(self, accel, brake, steer):
+         c = CtrlCmd()
+         c.header.stamp = self.get_clock().now().to_msg()
+         c.ctrl_mode = CtrlCmd.CTRL_MODE_AUTO
+-        c.gear = CtrlCmd.GEAR_DRIVE
++        c.gear = self.gear
+         c.long_cmd_type = CtrlCmd.LONG_CMD_THROTTLE
+         c.accel, c.brake, c.steering = float(accel), float(brake), float(steer)
+         self.cmd_pub.publish(c)
+diff -ruN a/hk_mit/hk_mit/course.py b/hk_mit/hk_mit/course.py
+--- a/hk_mit/hk_mit/course.py	2026-11-14 03:29:44.678740700 +0900
++++ b/hk_mit/hk_mit/course.py	2026-11-14 03:29:45.049921100 +0900
+@@ -74,12 +74,14 @@
+         """시작·복귀: 다음 nearest()는 경로 전체에서 찾습니다."""
+         self.idx = None
+ 
+-    def nearest(self, x, y):
++    def nearest(self, x, y, end=None):
+         """(x, y)에서 가장 가까운 경로 점의 번호. 시작·복귀 직후에는 경로 전체에서, 그 뒤에는 지난번 점부터
+-        앞쪽 40 m에서만 찾습니다(되돌아가지 않게)."""
++        앞쪽 40 m에서만 찾습니다(되돌아가지 않게). end를 주면 그 번호 앞까지만 (주차 동작의 정지 지점을 넘지 않게)."""
+         pts = self.points
+         start = 0 if self.idx is None else self.idx
+-        end = len(pts) if self.idx is None else min(self.idx + 80, len(pts))
++        limit = len(pts) if end is None else min(end, len(pts))
++        end = limit if self.idx is None else min(self.idx + 80, limit)
++        start = min(start, end - 1)
+         self.idx = min(range(start, end), key=lambda i: math.hypot(pts[i][0] - x, pts[i][1] - y))
+         return self.idx
+ 
+diff -ruN a/hk_mit/hk_mit/localization.py b/hk_mit/hk_mit/localization.py
+--- a/hk_mit/hk_mit/localization.py	2026-11-14 03:29:44.706571100 +0900
++++ b/hk_mit/hk_mit/localization.py	2026-11-14 03:29:45.052401700 +0900
+@@ -196,7 +196,8 @@
+         s, vw = self.s, self.speed
+         F, Q = np.eye(N), np.zeros((N, N))
+         still = abs(vw) < STILL
+-        self.v = v = vw * (1.0 - s[KS] - self.wheel_slip_per_accel * self.ax)
++        # 구동 슬립은 바퀴 속력 크기를 키움: 후진(vw < 0)이면 가속도 부호를 뒤집음 (후진 가속 = ax < 0)
++        self.v = v = vw * (1.0 - s[KS] - self.wheel_slip_per_accel * self.ax * (1.0 if vw >= 0 else -1.0))
+         if still:
+             self.w = 0.0                 # 정지: 실제 각속도는 0. 방향·위치는 그대로 두고 아래에서 바이어스 갱신
+         else:
+diff -ruN a/hk_mit/hk_mit/parking.py b/hk_mit/hk_mit/parking.py
+--- a/hk_mit/hk_mit/parking.py	1970-01-01 09:00:00.000000000 +0900
++++ b/hk_mit/hk_mit/parking.py	2026-11-14 03:29:45.056697800 +0900
+@@ -0,0 +1,537 @@
++"""주차 (평행·후면): LiDAR로 칸 위치 검출 → 전역 경로에 넣을 주차 동작(전진·후진 구간) 생성 → 차체 검사.
++
++ROS와 무관한 계산만 둡니다 (planner.py가 씁니다).
++
++관측한 구조 (탐색 주행 pk_probe*, seed 0/1/2, 주차를 켜고 끔):
++  - cp8~cp10 도로는 벽이 도로 중심에서 ±3.0 m (주차 구간은 도로 폭 단계로 좁히지 않음).
++  - 평행주차: 오른쪽 벽에 8.0 × 4.0 m 홈(pocket). 홈 중심 = 칸 중심. 칸 표시는 LiDAR에 보이지 않음.
++  - 후면주차: 왼쪽 벽에 폭 5.0 m 통로 → 통로 끝에 남북 19 × 5 m 방. 칸은 방 북쪽 끝(벽에서 0.1 m),
++    통로 중심은 course.json 미션 존 중심과 같은 위치(칸 중심에서 도로 방향 6.7 m 앞).
++  - seed는 칸·홈·통로·방을 함께 도로 방향으로 밀어 줌(slide). 미션을 끄면 slide 0 자리.
++  → 칸 쪽 벽 선에서 '열린 구간'(홈 입구, 통로 입구)을 찾아 그 중심과 미션 존 중심의 차이를 slide로 씁니다.
++
++좌표: 칸 좌표계 = 원점 칸 중심(검출), x = 칸 yaw 방향(= 도로 진행 방향), y = 왼쪽.
++자세는 뒤차축 (x, y, yaw), yaw는 차가 바라보는 방향(후진해도 차의 방향).
++성공 조건(규정): 차체 네 꼭짓점이 칸 안(여유 0.05 m), 방향 ±20°, 0.05 m/s 이하로 3 s.
++"""
++from dataclasses import dataclass, field
++import math
++
++import numpy as np
++
++FORWARD, REVERSE = 1, -1
++
++
++@dataclass
++class ParkingConfig:
++    wheelbase: float = 3.0
++    vehicle_length: float = 4.635
++    vehicle_width: float = 1.892
++    rear_overhang: float = 0.79
++    max_steer_deg: float = 35.4
++    radius_margin: float = 1.05     # 최소 회전반경 × 이 값 이상으로만 경로를 만듦 (조향 지연·추종 오차 여유)
++    step: float = 0.1               # 경로 점 간격 (m)
++    clearance: float = 0.3          # 차체 ~ 벽(모형·관측점) 최소 거리 (m)
++    slot_margin: float = 0.2        # 계획한 최종 차체가 칸 안쪽으로 이만큼 들어와야 함 (규정 0.05 + 추종 오차)
++    wall_band: float = 0.3          # 벽 선에서 이 거리 안의 관측점을 벽으로 봄 (m)
++    min_gap: float = 3.0            # 이보다 긴 벽 선의 빈 구간만 입구로 봄 (m)
++    gap_tolerance: float = 1.0      # 입구 중심이 (존 중심 ± slide 범위 ± 이 값) 밖이면 버림
++    wall_default: float = 3.0       # 벽을 못 찾았을 때 도로 중심 ~ 벽 거리 (m)
++
++    @property
++    def min_radius(self):
++        return self.wheelbase / math.tan(math.radians(self.max_steer_deg)) * self.radius_margin
++
++
++@dataclass
++class Mission:
++    id: str
++    type: str
++    slot_center: np.ndarray       # 존 json의 (slide 0) 칸 중심
++    slot_yaw: float
++    slot_length: float
++    slot_width: float
++    zone_center: np.ndarray
++    slide_axis: np.ndarray
++    slide_range: float
++
++    @classmethod
++    def from_json(cls, m):
++        slot = m['slot']
++        zone = np.asarray(m['zone'], dtype=float)
++        slide = m.get('slide') or {'axis': [0.0, 0.0], 'range': 0.0}
++        axis = np.asarray(slide['axis'], dtype=float)
++        norm = np.linalg.norm(axis)
++        return cls(m['id'], m['type'], np.asarray(slot['center'], dtype=float), float(slot['yaw']),
++                   float(slot['length']), float(slot['width']), zone.mean(axis=0),
++                   axis / norm if norm > 0 else axis, float(slide['range']))
++
++
++@dataclass
++class Segment:
++    gear: int                      # FORWARD / REVERSE
++    poses: np.ndarray              # (N, 3) 뒤차축 x, y, yaw (차 방향)
++    stop: bool = True              # 끝에서 정지(기어 전환·유지 지점)
++    hold: float = 0.0              # 끝에서 이만큼(s) 서 있음 (주차 유지)
++    name: str = ''
++
++
++@dataclass
++class Maneuver:
++    segments: list
++    slot_center: np.ndarray        # map
++    slide: float
++    start_x: float                 # 칸 좌표계에서 기존 경로를 떠나는 x / 돌아오는 x
++    end_x: float
++    info: dict = field(default_factory=dict)
++
++
++class SlotFrame:
++    """칸 좌표계 ↔ map."""
++
++    def __init__(self, origin, yaw):
++        self.o = np.asarray(origin, dtype=float)
++        self.yaw = float(yaw)
++        self.c, self.s = math.cos(yaw), math.sin(yaw)
++
++    def to_local(self, xy):
++        d = np.asarray(xy, dtype=float) - self.o
++        return np.stack([d[..., 0] * self.c + d[..., 1] * self.s, -d[..., 0] * self.s + d[..., 1] * self.c], axis=-1)
++
++    def to_map(self, xy):
++        xy = np.asarray(xy, dtype=float)
++        return np.stack([self.o[0] + xy[..., 0] * self.c - xy[..., 1] * self.s,
++                         self.o[1] + xy[..., 0] * self.s + xy[..., 1] * self.c], axis=-1)
++
++    def poses_to_map(self, poses):
++        out = np.empty_like(poses)
++        out[:, :2] = self.to_map(poses[:, :2])
++        out[:, 2] = poses[:, 2] + self.yaw
++        return out
++
++
++# ---- 기본 도형 -------------------------------------------------------------------------------------------
++def drive(pose, gear, length, kappa, step=0.1):
++    """뒤차축 자세에서 gear 방향으로 length(≥0)만큼, 곡률 kappa(+ 왼쪽 조향)로 이동한 자세 목록 (첫 점 제외)."""
++    n = max(1, int(math.ceil(length / step - 1e-9)))
++    s = gear * length * np.arange(1, n + 1) / n
++    x, y, th = pose
++    if abs(kappa) < 1e-9:
++        return np.column_stack((x + s * math.cos(th), y + s * math.sin(th), np.full(n, th)))
++    t = th + s * kappa
++    return np.column_stack((x + (np.sin(t) - math.sin(th)) / kappa, y - (np.cos(t) - math.cos(th)) / kappa, t))
++
++
++class PathBuilder:
++    def __init__(self, pose, step):
++        self.poses = [np.asarray([pose], dtype=float)]
++        self.step = step
++
++    @property
++    def end(self):
++        return self.poses[-1][-1]
++
++    def go(self, gear, length, kappa=0.0):
++        if length > 1e-6:
++            self.poses.append(drive(self.end, gear, length, kappa, self.step))
++        return self
++
++    def turn(self, gear, radius, angle, left):
++        """반지름 radius, 각 angle(rad, ≥0)만큼. left = 왼쪽 조향."""
++        return self.go(gear, radius * angle, (1.0 if left else -1.0) / radius)
++
++    def result(self):
++        return np.vstack(self.poses)
++
++
++# ---- 칸 검출 ---------------------------------------------------------------------------------------------
++def road_lateral(mission, route_xy):
++    """칸 좌표계(slide 0)에서 기준 경로(도로 중심)의 y와 그 직선성 (존 근처 경로 점의 y 표준편차)."""
++    frame = SlotFrame(mission.slot_center, mission.slot_yaw)
++    local = frame.to_local(route_xy)
++    reach = mission.slide_range + 12.0
++    near = local[(np.abs(local[:, 0] - frame.to_local(mission.zone_center)[0]) < reach)
++                 & (np.abs(local[:, 1]) < 30.0)]
++    if len(near) < 5:
++        return None, None
++    return float(np.median(near[:, 1])), float(np.std(near[:, 1]))
++
++
++def detect_slot(mission, points, y_road, cfg, opening_length=None):
++    """관측점(map, (N,2))에서 칸 쪽 벽 선의 열린 구간을 찾아 slide를 추정.
++
++    opening_length(m)를 주면 입구 중심 = 먼 쪽 끝 - 길이/2. 다가가며 보면 가까운 쪽 모서리 직전 벽은 비스듬히 보여
++    점이 듬성해 0.2~0.8 m 일찍 끝나는 것으로 보이고(탐색 주행), 먼 쪽 끝은 0.1 m 안으로 맞기 때문.
++    반환: dict(slide, slot_center(map), gap=(시작, 끝) 존 중심 기준 x, wall=벽 거리) 또는 None."""
++    if points is None or len(points) == 0:
++        return None
++    frame = SlotFrame(mission.slot_center, mission.slot_yaw)
++    local = frame.to_local(points)
++    side = -1.0 if y_road > 0 else 1.0             # 칸이 도로의 오른쪽(-y)이면 -1
++    offset = (local[:, 1] - y_road) * side          # 도로 중심에서 칸 쪽으로 잰 거리
++    a0 = float(frame.to_local(mission.zone_center)[0])
++    span = mission.slide_range + 14.0
++    sel = (np.abs(local[:, 0] - a0) < span)
++    # 벽 선: 칸 쪽 2.6~4.5 m의 관측점 거리 분포에서 가장 많은 곳. 칸 근처 직선 구간 점만
++    # (전체 경로 시험에서 굽은 길 앞 벽 점 때문에 2.35 m로 잡혀 모든 후보가 탈락한 적 있음)
++    near = np.abs(local[:, 0] - a0) < mission.slide_range + 8.0
++    cand = offset[sel & near & (offset > 2.6) & (offset < 4.5)]
++    wall = cfg.wall_default
++    if len(cand) >= 20:
++        hist, edges = np.histogram(cand, bins=np.arange(2.3, 4.55, 0.1))
++        k = int(np.argmax(hist))
++        on = cand[(cand >= edges[k] - 0.1) & (cand < edges[k + 1] + 0.1)]
++        wall = float(np.median(on))
++    xs = np.sort(local[sel & (np.abs(offset - wall) < cfg.wall_band), 0])
++    if len(xs) < 10:
++        return None
++    gaps = np.diff(xs)
++    best = None
++    for k in np.flatnonzero(gaps > cfg.min_gap):
++        lo, hi = xs[k], xs[k + 1]
++        # 가까운 쪽 끝 3 m 안에 벽 점이 충분하고, 먼 쪽은 벽 점 2개(4 m 안) 또는 입구 안쪽 면 점 5개 (멀어서 듬성한 빈틈 배제)
++        far_face = np.count_nonzero(sel & (offset > wall + 0.3) & (offset < wall + 1.5)
++                                    & (local[:, 0] > hi - 1.0) & (local[:, 0] < hi + 0.3))
++        if (np.count_nonzero((xs > lo - 3.0) & (xs <= lo)) < 4
++                or (np.count_nonzero((xs >= hi) & (xs < hi + 4.0)) < 2 and far_face < 5)):
++            continue
++        # 먼 쪽 끝 다듬기: 입구 안쪽 면(도로 쪽을 향한 벽 면)과 모서리 점들 중 가까운 쪽 10 %
++        face = local[sel & (offset > wall - 0.3) & (offset < wall + 1.5)
++                     & (local[:, 0] > hi - 1.0) & (local[:, 0] < hi + 0.3), 0]
++        if len(face) >= 5:
++            hi = min(hi, float(np.percentile(face, 10)))
++        centre = 0.5 * (lo + hi)
++        # 가까운 쪽 모서리는 일찍 끝나 보일 뿐(입구가 길어 보임) 늦게 보이지는 않으므로 긴 쪽으로 넉넉히 허용
++        if opening_length and -1.0 < (hi - lo) - opening_length < 3.0:
++            centre = hi - 0.5 * opening_length
++        if abs(centre - a0) > mission.slide_range + cfg.gap_tolerance:
++            continue
++        if best is None or abs(centre - a0) < abs(best[2] - a0):
++            best = (lo, hi, centre)
++    if best is None:
++        return None
++    lo, hi, centre = best
++    shift = (centre - a0) * np.array([frame.c, frame.s])      # map에서 칸이 밀린 벡터
++    slide = float(np.dot(shift, mission.slide_axis)) if np.linalg.norm(mission.slide_axis) > 0 else 0.0
++    return {'slide': slide, 'slot_center': mission.slot_center + slide * mission.slide_axis,
++            'gap': (float(lo - a0), float(hi - a0)), 'gap_length': float(hi - lo), 'wall': wall}
++
++
++# ---- 차체 검사 ---------------------------------------------------------------------------------------------
++def body_outline(cfg, inflate=0.0, step=0.15):
++    front = cfg.vehicle_length - cfg.rear_overhang + inflate
++    rear = -cfg.rear_overhang - inflate
++    half = cfg.vehicle_width / 2 + inflate
++    xs = np.linspace(rear, front, max(2, int(math.ceil((front - rear) / step)) + 1))
++    ys = np.linspace(-half, half, max(2, int(math.ceil(2 * half / step)) + 1))
++    return np.vstack([np.column_stack((xs, np.full_like(xs, -half))), np.column_stack((xs, np.full_like(xs, half))),
++                      np.column_stack((np.full_like(ys, rear), ys)), np.column_stack((np.full_like(ys, front), ys))])
++
++
++def body_corners(pose, cfg):
++    x, y, th = pose
++    c, s = math.cos(th), math.sin(th)
++    out = []
++    for lx in (-cfg.rear_overhang, cfg.vehicle_length - cfg.rear_overhang):
++        for ly in (-cfg.vehicle_width / 2, cfg.vehicle_width / 2):
++            out.append((x + lx * c - ly * s, y + lx * s + ly * c))
++    return np.asarray(out)
++
++
++def outline_points(poses, outline):
++    c, s = np.cos(poses[:, 2])[:, None], np.sin(poses[:, 2])[:, None]
++    x = poses[:, 0][:, None] + outline[:, 0][None] * c - outline[:, 1][None] * s
++    y = poses[:, 1][:, None] + outline[:, 0][None] * s + outline[:, 1][None] * c
++    return x, y
++
++
++def free_space_ok(poses, rects, cfg):
++    """차체 외곽(여유 clearance 포함)의 모든 점이 자유 공간 직사각형들의 합집합 안에 있으면 True.
++    rects: [(x0, x1, y0, y1)] 칸 좌표계. 반환 (ok, 처음 걸린 자세 번호)."""
++    x, y = outline_points(poses, body_outline(cfg, cfg.clearance))
++    inside = np.zeros(x.shape, dtype=bool)
++    for x0, x1, y0, y1 in rects:
++        inside |= (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
++    bad = ~inside.all(axis=1)
++    return (not bad.any()), (int(np.argmax(bad)) if bad.any() else -1)
++
++
++def points_clear(poses, points, cfg):
++    """관측점(칸 좌표계)이 차체(+clearance) 안에 하나도 없으면 True. 반환 (ok, 걸린 자세 번호, 최소 여유)."""
++    if points is None or len(points) == 0:
++        return True, -1, math.inf
++    front = cfg.vehicle_length - cfg.rear_overhang
++    half = cfg.vehicle_width / 2
++    best, first = math.inf, -1
++    # 경로 근처 점만
++    lo, hi = poses[:, :2].min(axis=0) - 6.0, poses[:, :2].max(axis=0) + 6.0
++    pts = points[(points[:, 0] > lo[0]) & (points[:, 0] < hi[0]) & (points[:, 1] > lo[1]) & (points[:, 1] < hi[1])]
++    if len(pts) == 0:
++        return True, -1, math.inf
++    for k in range(0, len(poses), 2):
++        x, y, th = poses[k]
++        c, s = math.cos(th), math.sin(th)
++        dx, dy = pts[:, 0] - x, pts[:, 1] - y
++        bx, by = dx * c + dy * s, -dx * s + dy * c
++        ex = np.maximum(np.maximum(-cfg.rear_overhang - bx, bx - front), 0.0)
++        ey = np.maximum(np.abs(by) - half, 0.0)
++        d = float(np.min(np.hypot(ex, ey)))
++        if d < best:
++            best = d
++        if d < cfg.clearance and first < 0:
++            first = k
++    return first < 0, first, best
++
++
++def in_slot(pose, length, width, margin, cfg):
++    """칸 좌표계 최종 자세가 칸 안(여유 margin)이고 방향 ±20° 안이면 True."""
++    corners = body_corners(pose, cfg)
++    yaw = (pose[2] + math.pi) % (2 * math.pi) - math.pi
++    return (abs(yaw) <= math.radians(20.0) and np.all(np.abs(corners[:, 0]) <= length / 2 - margin)
++            and np.all(np.abs(corners[:, 1]) <= width / 2 - margin))
++
++
++# ---- 동작 후보 ---------------------------------------------------------------------------------------------
++def two_arc(builder, gear, radius, shift, first_left):
++    """같은 반지름 두 원호 S자로 옆으로 shift(>0)만큼 이동하고 같은 방향으로 끝남. 진행 거리 = 2R sinθ."""
++    th = math.acos(max(-1.0, 1.0 - shift / (2 * radius)))
++    builder.turn(gear, radius, th, first_left).turn(gear, radius, th, not first_left)
++    return 2 * radius * math.sin(th)
++
++
++def parallel_candidates(y_road, cfg, p):
++    """평행주차: (기존 경로) → [옆 이동] → 칸을 지나 정지 → 후진 S자(오른쪽·왼쪽 조향)로 칸 뒤쪽에 → 유지 →
++    전진 S자로 도로 중심에 복귀. 칸이 도로 오른쪽(y<0)인 경우의 식이며, 왼쪽이면 y를 뒤집어 씁니다."""
++    side = -1.0 if y_road > 0 else 1.0                   # 칸 쪽 (오른쪽 -1)
++    yr = abs(y_road)                                      # 도로 중심까지 (칸 쪽을 -y로 정규화)
++    back = cfg.vehicle_length / 2 - cfg.rear_overhang     # 뒤차축 → 차체 중심
++    out = []
++    for radius in p['radii']:
++        for y_f in p['final_lateral']:                   # 칸 중심에서 도로 쪽(+)으로 뒤차축 옆 위치
++            for x_back in p['final_back']:               # 차체 중심을 칸 중심에서 뒤로(-x) 이만큼
++                for y_s in p['start_lateral']:            # 후진 시작점: 도로 중심에서 칸 쪽(-)/반대(+) m
++                    x_f = -x_back - back
++                    ys = yr + y_s
++                    d = ys - y_f
++                    if d <= 0 or d >= 4 * radius:
++                        continue
++                    th = math.acos(1 - d / (2 * radius))
++                    x_s = x_f + 2 * radius * math.sin(th)
++                    # 전진: 도로 중심 → (옆 이동 S자) → 시작점
++                    shift = ys - yr
++                    if abs(shift) > 1e-3:
++                        sh_r = p['shift_radius']
++                        th_s = math.acos(1 - abs(shift) / (2 * sh_r))
++                        length = 2 * sh_r * math.sin(th_s)
++                    else:
++                        length = 0.0
++                    x0 = x_s - length - p['straight_before_stop']
++                    a = PathBuilder((x0, yr, 0.0), cfg.step)
++                    if length:
++                        two_arc(a, FORWARD, sh_r, abs(shift), shift > 0)
++                    a.go(FORWARD, x_s - a.end[0])
++                    fwd = a.result()
++                    r = PathBuilder(tuple(fwd[-1]), cfg.step)
++                    r.turn(REVERSE, radius, th, False).turn(REVERSE, radius, th, True)
++                    rev = r.result()
++                    # 복귀: 전진 S자 (왼쪽·오른쪽)
++                    e = PathBuilder(tuple(rev[-1]), cfg.step)
++                    ex_r = p['exit_radius']
++                    dist = two_arc(e, FORWARD, ex_r, yr - rev[-1][1], True)
++                    ext = e.result()
++                    segs = [Segment(FORWARD, fwd, True, 0.0, 'approach'),
++                            Segment(REVERSE, rev, True, p['hold_s'], 'reverse_in'),
++                            Segment(FORWARD, ext, False, 0.0, 'exit')]
++                    if side > 0:                         # 칸이 왼쪽: y 뒤집기
++                        for sg in segs:
++                            sg.poses = sg.poses * np.array([1.0, -1.0, -1.0])
++                    cost = (len(fwd) + 1.6 * len(rev) + len(ext)) * cfg.step + p['cost_per_radius'] * radius
++                    out.append((cost, segs, {'radius': radius, 'theta_deg': math.degrees(th), 'y_f': y_f,
++                                             'x_back': x_back, 'y_s': y_s, 'exit_dist': dist}))
++    out.sort(key=lambda c: c[0])
++    return out
++
++
++def rear_candidates(y_road, x_passage, cfg, p):
++    """후면주차: 도로 → 왼쪽 90° 원호로 통로 진입 → 직진 → 오른쪽 90° 원호로 방 안에서 남쪽(칸 방향)을 봄 →
++    정지 → 직진 후진으로 칸에 → 유지 → 전진 직진 → 오른쪽 90° → 통로 직진 → 왼쪽 90°로 도로 복귀.
++    칸이 도로 왼쪽(y>0)인 경우의 식이며, 오른쪽이면 y를 뒤집습니다."""
++    side = 1.0 if y_road < 0 else -1.0
++    yr = -abs(y_road)
++    back = cfg.vehicle_length / 2 - cfg.rear_overhang
++    out = []
++    for ra in p['entry_radii']:
++        for rb in p['turn_radii']:
++            for x_back in p['final_back']:
++                for dx in p['passage_offsets']:          # 통로 중심에서 진입 선 옮김 (+ 앞쪽)
++                    xp = x_passage + dx
++                    y_f = p['final_lateral']
++                    x_f = -back + x_back                  # x_back: 차체 중심을 칸 중심에서 +x(앞)로
++                    a = PathBuilder((xp - ra - p['straight_before'], yr, 0.0), cfg.step)
++                    a.go(FORWARD, p['straight_before'])
++                    a.turn(FORWARD, ra, math.pi / 2, True)
++                    a.go(FORWARD, (y_f - rb) - a.end[1])
++                    a.turn(FORWARD, rb, math.pi / 2, False)
++                    a.go(FORWARD, p['straight_after_turn'])
++                    fwd = a.result()
++                    if fwd[-1][0] <= x_f + 1.0:
++                        continue
++                    r = PathBuilder(tuple(fwd[-1]), cfg.step)
++                    r.go(REVERSE, fwd[-1][0] - x_f)
++                    rev = r.result()
++                    e = PathBuilder(tuple(rev[-1]), cfg.step)
++                    rc, rd = p['exit_turn_radius'], p['exit_radius']
++                    xe = x_passage + p['exit_passage_offset']
++                    e.go(FORWARD, (xe - rc) - e.end[0])
++                    e.turn(FORWARD, rc, math.pi / 2, False)
++                    e.go(FORWARD, e.end[1] - (yr + rd))
++                    e.turn(FORWARD, rd, math.pi / 2, True)
++                    ext = e.result()
++                    if (xe - rc) < x_f:
++                        continue
++                    segs = [Segment(FORWARD, fwd, True, 0.0, 'approach'),
++                            Segment(REVERSE, rev, True, p['hold_s'], 'reverse_in'),
++                            Segment(FORWARD, ext, False, 0.0, 'exit')]
++                    if side < 0:
++                        for sg in segs:
++                            sg.poses = sg.poses * np.array([1.0, -1.0, -1.0])
++                    cost = (len(fwd) + 1.6 * len(rev) + len(ext)) * cfg.step
++                    out.append((cost, segs, {'entry_radius': ra, 'turn_radius': rb, 'x_back': x_back,
++                                             'passage_offset': dx, 'reverse_m': float(fwd[-1][0] - x_f)}))
++    out.sort(key=lambda c: c[0])
++    return out
++
++
++def plan_maneuver(mission, detection, y_road, cfg, params, free_rects, points_map=None, log=None):
++    """검출한 칸에 맞춰 후보를 만들고, 자유 공간 모형과 관측점에 대해 검사해 가장 싼 것을 고름.
++
++    free_rects: 칸 좌표계 자유 공간 직사각형 (도로 띠는 y_road ± wall로 여기서 추가).
++    반환 Maneuver(map 좌표) 또는 None."""
++    slot = detection['slot_center']
++    frame = SlotFrame(slot, mission.slot_yaw)
++    wall = detection.get('wall', cfg.wall_default)
++    if abs(wall - cfg.wall_default) > 0.25:          # 터무니없는 벽 거리는 기본값 (관측점 검사는 따로 함)
++        wall = cfg.wall_default
++    rects = [(-80.0, 80.0, y_road - wall, y_road + wall)] + [tuple(r) for r in free_rects]
++    pts = frame.to_local(points_map) if points_map is not None and len(points_map) else None
++    if mission.type == 'parallel_parking':
++        cands = parallel_candidates(y_road, cfg, params)
++    elif mission.type == 'rear_parking':
++        x_passage = float(frame.to_local(mission.zone_center + detection['slide'] * mission.slide_axis)[0])
++        cands = rear_candidates(y_road, x_passage, cfg, params)
++    else:
++        return None
++    reasons = {}
++    for cost, segs, info in cands:
++        final = segs[1].poses[-1] if len(segs) > 1 else segs[0].poses[-1]
++        if not in_slot(final, mission.slot_length, mission.slot_width, cfg.slot_margin, cfg):
++            reasons['slot'] = reasons.get('slot', 0) + 1
++            continue
++        allp = np.vstack([s.poses for s in segs])
++        ok, _ = free_space_ok(allp, rects, cfg)
++        if not ok:
++            reasons['free_space'] = reasons.get('free_space', 0) + 1
++            continue
++        ok, _, gap = points_clear(allp, pts, cfg)
++        if not ok:
++            reasons['points'] = reasons.get('points', 0) + 1
++            continue
++        out = []
++        for s in segs:
++            out.append(Segment(s.gear, frame.poses_to_map(s.poses), s.stop, s.hold, s.name))
++        final = frame.poses_to_map(np.asarray([final]))[0]
++        info['final_pose'] = [round(float(v), 3) for v in final]
++        info = dict(info, cost=round(cost, 2), point_gap=round(gap, 2) if math.isfinite(gap) else None,
++                    rejected=reasons)
++        return Maneuver(out, slot, detection['slide'], float(segs[0].poses[0][0]), float(segs[-1].poses[-1][0]), info)
++    if log:
++        log(f'주차 후보 {len(cands)}개 모두 탈락: {reasons}')
++    return None
++
++
++@dataclass
++class Spliced:
++    points: np.ndarray       # (M, 2) 따라갈 점: 전진 동작은 앞바퀴 축 궤적, 후진 동작은 뒤차축, 기존 경로는 그대로
++    yaws: np.ndarray         # (M,) 차 방향 (후진이면 진행 방향 + π)
++    gears: np.ndarray        # (M,) +1 / -1
++    segments: list           # [(시작 번호, 끝 번호, gear, stop, hold, 이름, 끝 뒤차축 자세(map))]
++    first: int               # 동작의 첫 점 번호 (그 앞은 기존 경로)
++    last: int                # 동작의 마지막 점 번호 (그 뒤는 기존 경로)
++
++
++def splice_route(route_xy, maneuver, mission, lead, route_yaws=None, route_gears=None, step=0.25):
++    """기존 경로 점(map, (N,2))에 주차 동작을 끼움. lead = 축간 거리 (전진 동작을 앞바퀴 축 궤적으로 바꿈).
++
++    처음 구간 = 기존 경로 앞부분 + 첫 동작, 마지막 구간 = 마지막 동작 + 기존 경로 뒷부분.
++    구간 경계(정지 지점)에서 점은 겹치지 않음: 전진 구간 끝은 앞바퀴 축, 후진 구간 처음은 뒤차축."""
++    route_xy = np.asarray(route_xy, dtype=float)
++    frame = SlotFrame(maneuver.slot_center, mission.slot_yaw)
++    local = frame.to_local(route_xy)
++    segs_in = maneuver.segments
++
++    def track(s):
++        poses = s.poses[::max(1, int(round(step / 0.1)))]
++        if not np.allclose(poses[-1], s.poses[-1]):
++            poses = np.vstack([poses, s.poses[-1]])
++        xy = poses[:, :2].copy()
++        if s.gear == FORWARD:
++            xy += lead * np.column_stack((np.cos(poses[:, 2]), np.sin(poses[:, 2])))
++        return xy, poses[:, 2]
++
++    tracks = [track(s) for s in segs_in]
++    x0 = frame.to_local(tracks[0][0][0])[0]
++    x1 = frame.to_local(tracks[-1][0][-1])[0]
++    # 칸 근처(옆 30 m 안)의 경로에서 x0 앞 마지막 점, x1 뒤 첫 점
++    idx = np.flatnonzero(np.abs(local[:, 1]) < 30.0)
++    before = idx[local[idx, 0] < x0 - 0.05]
++    if len(before) == 0:
++        return None
++    i0 = int(before.max())
++    after = idx[(local[idx, 0] > x1 + 0.05) & (idx > i0)]
++    if len(after) == 0:
++        return None
++    i1 = int(after.min())
++
++    def route_yaw(k):
++        if route_yaws is not None:
++            return float(route_yaws[k])
++        j = max(0, min(k, len(route_xy) - 2))
++        d = route_xy[j + 1] - route_xy[j]
++        return math.atan2(d[1], d[0])
++
++    pts = [route_xy[k] for k in range(i0 + 1)]
++    yaws = [route_yaw(k) for k in range(i0 + 1)]
++    gears = [int(route_gears[k]) if route_gears is not None else FORWARD for k in range(i0 + 1)]
++    segs = []
++    for n, (s, (xy, th)) in enumerate(zip(segs_in, tracks)):
++        begin = 0 if n == 0 else len(pts)
++        for p, t in zip(xy, th):
++            if np.linalg.norm(p - pts[-1]) < 1e-3:
++                continue
++            pts.append(p); yaws.append(float(t)); gears.append(s.gear)
++        segs.append([begin, len(pts) - 1, s.gear, s.stop, s.hold, s.name, s.poses[-1].copy()])
++    last = len(pts) - 1
++    for k in range(i1, len(route_xy)):
++        pts.append(route_xy[k]); yaws.append(route_yaw(k))
++        gears.append(int(route_gears[k]) if route_gears is not None else FORWARD)
++    segs[-1][1] = len(pts) - 1
++    return Spliced(np.asarray(pts), np.asarray(yaws), np.asarray(gears), [tuple(s) for s in segs], i0 + 1, last)
++
++
++def parallel_exit(pose, y_road, radius, step=0.1):
++    """평행주차 칸에서 실제로 선 자세(칸 좌표계)로부터 전진 S자(칸 반대쪽 조향 → 되돌림)로 도로 중심(y_road,
++    방향 0)에 합류하는 자세 목록. 첫 원호는 방향 ψ0 → φ, 둘째는 φ → 0:
++        옆 이동 = R(cos ψ0 + 1 - 2 cos φ),  cos φ = (cos ψ0 + 1 - 옆 이동 / R) / 2."""
++    side = -1.0 if y_road > 0 else 1.0                   # 칸 쪽 (오른쪽 -1). 칸이 오른쪽인 식으로 정규화
++    x0, y0, th0 = pose[0], pose[1] * -side, pose[2] * -side
++    shift = abs(y_road) - y0
++    c = (math.cos(th0) + 1.0 - shift / radius) / 2.0
++    if not -1.0 <= c <= 1.0 or shift <= 0:
++        return None
++    phi = math.acos(c)
++    if phi < th0:
++        return None
++    b = PathBuilder((x0, y0, th0), step)
++    b.turn(FORWARD, radius, phi - th0, True).turn(FORWARD, radius, phi, False)
++    out = b.result()
++    return out * np.array([1.0, -side, -side])
+diff -ruN a/hk_mit/hk_mit/planner.py b/hk_mit/hk_mit/planner.py
+--- a/hk_mit/hk_mit/planner.py	2026-11-14 03:29:44.690183000 +0900
++++ b/hk_mit/hk_mit/planner.py	2026-11-14 03:29:45.064345800 +0900
+@@ -11,6 +11,16 @@
+ from the obstacle clouds; before the entry the planner yields at a stop point when the predicted merge gap is too
+ small, and on the ring it caps speed from the gap to the NPC ahead. A generic forward-collision speed cap for any
+ observed cluster on the path is applied inside collision zones (default: the roundabout section).
++
++Parking (parking.py): while approaching an enabled parking mission zone, map-frame LiDAR points near the zone are
++accumulated; the opening in the slot-side wall gives the seed slide. A maneuver (forward → stop → reverse → hold →
++forward exit) is then spliced into the GLOBAL route. Each route point carries a gear (+1/-1) and the route is split
++into segments whose ends are stop points (cusps, hold). Only the current segment is published, the nearest-point
++search never crosses its end, and /hk/plan/gear (std_msgs/Int8) tells control how to follow the published path:
++  0      normal driving (forward; the path continues — previous behaviour),
++  +1/+2  parking segment, forward (2: the published path ends at a stop point),
++  -1/-2  parking segment, reverse (2: ends at a stop point); poses are rear-axle poses, orientation = vehicle yaw.
++Forward parking paths are the front-axle trace of the designed rear-axle poses (control tracks the front axle).
+ """
+ from collections import Counter
+ import json
+@@ -27,11 +37,13 @@
+ from sensor_msgs.msg import PointCloud2
+ from sensor_msgs_py import point_cloud2
+ from scipy.spatial import cKDTree
+-from std_msgs.msg import Float32, String
++from std_msgs.msg import Float32, Int8, String
+ from visualization_msgs.msg import Marker, MarkerArray
+ 
+ from .avoidance import AvoidanceConfig, Ego, ReferencePath, footprint_corners, plan_avoidance, speed_profile
+ from .course import COURSE_DIR, declare_file_params, files_signature, load_route, Route
++from .parking import (FORWARD, REVERSE, Maneuver, Mission, ParkingConfig, Segment, SlotFrame, detect_slot,
++                      free_space_ok, parallel_exit, plan_maneuver, road_lateral, splice_route)
+ from .roundabout import NpcTracker, follow_speed, merge_conflicts, ring_reference, stop_point, travel_time, wrap
+ from .sim_events import SimEvents
+ 
+@@ -81,6 +93,31 @@
+     'collision_stop_gap': 3.0,        # 경로 위 물체와 앞 범퍼 사이에 남길 거리 (m)
+     'collision_half_width': 1.2,      # 경로에서 이 거리 안의 관측점을 경로 위 물체로 봄 (m)
+     'collision_horizon': 25.0,        # 이만큼 앞까지 검사 (m)
++    # 주차 (parking.py). 거리는 m, 속력 m/s
++    'parking_speed': 3.0,             # 주차 전진 구간 속력 상한
++    'parking_reverse_speed': 2.0,     # 후진 구간 속력 상한
++    'parking_lateral_accel': 2.0,     # 주차 원호 횡가속도 한계 (m/s²)
++    'parking_stop_decel': 1.2,        # 정지 지점 앞 감속도 (m/s², 제어도 같은 값으로 50 Hz 정지)
++    'parking_approach_decel': 1.2,    # 동작 안 원호 속력 상한까지 미리 줄이는 감속도 (m/s², 제어 PI 지연 여유)
++    'parking_stop_tolerance': 0.2,    # 정지 지점까지 남은 거리가 이보다 작고 멈췄으면 도착
++    'parking_accept_short': 0.6,      # 이 안에서 parking_short_wait 동안 멈춰 있으면 도착으로 봄
++    'parking_short_wait': 1.5,
++    'parking_hold_s': 3.4,            # 칸 안에서 서 있는 시간 (규정 3 s)
++    'parking_stopped_speed': 0.03,    # 이보다 느리면 멈춤
++    'parking_detect_range': 45.0,     # 존 중심까지 도로 방향 거리가 이 안이면 관측점을 모으고 칸을 찾음
++    'parking_commit_distance': 12.0,  # 칸을 못 찾았으면 (존 중심 - slide 범위 - 이 거리)에 정지해 기다림
++    'parking_commit_decel': 2.5,
++    'parking_stable_scans': 3.0,      # 이만큼 연속으로 같은 slide(± parking_stable_tol)가 나오면 확정
++    'parking_stable_tol': 0.3,
++    'parking_refine_until': 4.0,      # 동작 시작 이만큼(m) 전까지 칸을 다시 찾아 동작을 고침
++    'parking_refine_tol': 0.08,       # slide가 이만큼 넘게 바뀌면 다시 만듦 (m)
++    'parking_clearance': 0.3,         # 계획 경로의 차체 ~ 벽 모형·관측점 최소 거리
++    'parking_slot_margin': 0.15,      # 계획한 최종 차체가 칸 경계 안쪽으로 들어온 거리 (규정 0.05)
++    'parking_radius_margin': 1.05,    # 최소 회전반경 × 이 값 이상 원호만
++    'parking_voxel': 0.1,             # 관측점 누적 격자 (m)
++    'parking_point_window': 3.0,      # 칸 검출에 이 시간(s) 안에 본 점만 씀
++    'rear_back_wall_x': -2.8,         # 후면주차 방 북쪽 벽 (칸 좌표계 x, 칸 끝에서 0.1 m 뒤). 후진 정지 지점을 이 벽 기준으로
++    'parking_wall_search': 0.6,       # 예상 위치 ± 이 거리(m)에서 벽 점을 찾고, 정지 지점을 최대 이만큼 옮김
+ }
+ SETTLE_S = 0.5          # 시작·복귀 뒤 이 시간 동안은 경로 전체에서 위치를 다시 찾음 (늦게 온 예전 위치 대비)
+ 
+@@ -109,6 +146,36 @@
+         self.declare_parameter('collision_zones', [-1.0])
+         self.declare_parameter('collision_min_points', 3)
+         self.collision_min_points = int(self.get_parameter('collision_min_points').value)
++        # 주차: 켤지, 미션 종류, 칸 좌표계 자유 공간 직사각형 [x0, x1, y0, y1, ...], 후보 동작 값 (bringup.yaml 설명)
++        self.declare_parameter('parking_enabled', True)
++        self.parking_enabled = bool(self.get_parameter('parking_enabled').value)
++        self.declare_parameter('parking_mission_types', ['parallel_parking', 'rear_parking'])
++        self.declare_parameter('parallel_parking_free', [-4.0, 4.0, -2.05, 2.5])
++        self.declare_parameter('parallel_opening_length', 8.0)    # 칸 쪽 벽 입구 길이 (m, 0 = 관측 양 끝 중심)
++        self.declare_parameter('rear_opening_length', 5.0)
++        self.declare_parameter('rear_parking_free', [4.2, 9.2, -11.0, -2.0, -2.8, 16.2, -2.475, 2.525])
++        self.declare_parameter('parallel_radius_scales', [1.0, 1.1])
++        self.declare_parameter('parallel_final_lateral', [0.6, 0.5])
++        self.declare_parameter('parallel_final_back', [1.1, 1.0, 1.2])
++        self.declare_parameter('parallel_start_lateral', [0.0, -0.5, 0.5])
++        self.declare_parameter('parallel_exit_radius_scale', 1.0)
++        self.declare_parameter('rear_entry_radius_scales', [1.0])
++        self.declare_parameter('rear_turn_radii', [5.0, 4.7])
++        self.declare_parameter('rear_passage_offsets', [-0.75, -0.5])
++        self.declare_parameter('rear_final_lateral', -0.2)
++        self.declare_parameter('rear_final_back', [0.05])
++        self.declare_parameter('rear_exit_turn_radius_scale', 1.0)
++        self.declare_parameter('rear_exit_radius_scale', 1.0)
++        self.declare_parameter('rear_exit_passage_offset', -0.25)
++        self.park_missions = []          # [Mission] 이번 시도에서 켠 주차 미션 (경로 순서)
++        self.park_cfg = ParkingConfig(
++            wheelbase=self.wheelbase, vehicle_length=self.vehicle_length, vehicle_width=self.vehicle_width,
++            rear_overhang=self.rear_overhang, max_steer_deg=self.max_steer_deg,
++            radius_margin=self.parking_radius_margin, clearance=self.parking_clearance,
++            slot_margin=self.parking_slot_margin)
++        self.base_points = None          # 주차 동작을 넣기 전 경로 (복귀하면 되돌림)
++        self.park_done = set()           # 끝낸(또는 포기한) 주차 미션 id
++        self.reset_parking_state()
+         self.ring = None                 # roundabout.RingGeometry (회전교차로가 없으면 None)
+         self.ring_s = {}
+         self.speed_reference = None      # 속도 프로파일용 뒤차축 경로 (회전교차로 구간을 바꿨을 때)
+@@ -146,6 +213,9 @@
+         self.speed_pub = self.create_publisher(Float32, '/hk/plan/speed_limit', 1)
+         self.status_pub = self.create_publisher(String, '/hk/plan/status', 1)
+         self.marker_pub = self.create_publisher(MarkerArray, '/hk/plan/avoidance_markers', 1)
++        # 경로를 따르는 방법: 0 일반 주행, +1 주차 전진(경로 끝 = 정지 지점), -1 주차 후진(경로 끝 = 정지 지점)
++        self.gear_pub = self.create_publisher(Int8, '/hk/plan/gear', 1)
++        self.park_marker_pub = self.create_publisher(MarkerArray, '/hk/plan/parking_markers', 1)
+         SimEvents(self, self.on_reset, self.on_end)
+         self.create_timer(1.0 / RATE_HZ, self.plan)
+ 
+@@ -166,6 +236,17 @@
+             self.setup_roundabout()
+             self.build_profile()
+             self.files_loaded = signature
++            self.base_points = None
++        if self.base_points is None:
++            self.base_points = list(self.route.points)
++            self.base_reference = self.reference
++        elif self.route_spliced:                      # 시작·복귀: 주차 동작을 넣은 경로를 원래대로
++            self.route.points = list(self.base_points)
++            self.reference = self.base_reference
++        if reload:
++            self.park_missions = self.load_parking_missions()
++            self.park_done = set()
++        self.reset_parking_state()
+         if reload or self.avoidance_ranges is None:
+             self.avoidance_ranges = self.load_avoidance_ranges()
+             self.get_logger().info(f'전역 경로 {len(self.route.points)}점, 속도 프로파일 '
+@@ -243,6 +324,445 @@
+             return []
+         return [(self.ring_s['stop'] - 30.0, self.ring_s['exit'] + 10.0)]
+ 
++    # ---- 주차 -------------------------------------------------------------------------------------------------
++    def reset_parking_state(self):
++        """시작·복귀: 모은 관측점, 검출 기록, 진행 중인 주차 동작을 비움 (끝낸 미션 기록은 유지)."""
++        if not hasattr(self, 'park_done'):
++            self.park_done = set()
++        self.park_plan = None            # dict: mission, spliced, segments ... (경로에 넣은 동작)
++        self.park_seg = 0
++        self.park_voxels = {}            # 격자 칸 → 마지막으로 본 시각
++        self.park_history = []
++        self.park_wait_since = None
++        self.park_stop_since = None
++        self.park_hold_since = None
++        self.park_info = {}
++        self.park_station = None
++        self.park_offsets = []           # [(끼운 경로의 경로 거리, 원래 경로보다 늘어난 길이)] 속도 프로파일 대응용
++        self.route_spliced = False       # 경로에 주차 동작을 넣었음 (복귀하면 base_points로 되돌림)
++        self.route_yaws = self.route_gears = None
++
++    def load_parking_missions(self):
++        """course.json의 주차 미션 중 이번 시도에서 켠 것 (경로 순서)."""
++        if not self.parking_enabled:
++            return []
++        types = set(self.get_parameter('parking_mission_types').value)
++        path = self.get_parameter('course_json').value or str(COURSE_DIR / 'course.json')
++        try:
++            with open(path, encoding='utf-8') as f:
++                raw = [m for m in json.load(f)['course'].get('missions', []) if m.get('type') in types and m.get('slot')]
++        except (OSError, ValueError, KeyError) as error:
++            self.get_logger().warn(f'코스 파일에서 주차 미션을 읽지 못함: {error}')
++            return []
++        try:
++            with open(self.get_parameter('attempt_course_json').value, encoding='utf-8') as f:
++                options = json.load(f).get('options', {})
++            raw = [m for m in raw if options.get(m['type'], True)]
++        except (OSError, ValueError):
++            pass                                   # 시도 파일이 없으면 모든 주차 미션을 함
++        out = []
++        route = np.asarray(self.route.points, dtype=float)
++        for m in raw:
++            mission = Mission.from_json(m)
++            y_road, spread = road_lateral(mission, route)
++            if y_road is None or spread > 0.3:
++                self.get_logger().warn(f'{mission.id}: 칸 근처 경로가 직선이 아니어서 주차를 하지 않음')
++                continue
++            mission.y_road = y_road
++            mission.station = float(self.reference.project(mission.zone_center[None])[0][0])
++            out.append(mission)
++        out.sort(key=lambda m: m.station)
++        if out:
++            self.get_logger().info('주차 미션: ' + ', '.join(f'{m.id}({m.type}, 존 중심 s={m.station:.0f} m, '
++                                                          f'도로 중심 y={m.y_road:+.2f})' for m in out))
++        return out
++
++    def active_parking(self):
++        return next((m for m in self.park_missions if m.id not in self.park_done), None)
++
++    def collect_parking_points(self, clusters):
++        """진행할 주차 미션 존 근처의 관측점을 격자(parking_voxel)로 모음."""
++        mission = self.active_parking()
++        if mission is None or self.odom is None or not clusters or (self.park_plan is not None and self.park_seg > 0):
++            return
++        frame = SlotFrame(mission.slot_center, mission.slot_yaw)
++        a0 = float(frame.to_local(mission.zone_center)[0])
++        station = getattr(self, 'park_station', None)       # plan()에서 구한 차의 경로 거리
++        if station is None or mission.station - station > self.parking_detect_range + 5.0:
++            return
++        local = frame.to_local(np.vstack(clusters))
++        keep = ((np.abs(local[:, 0] - a0) < mission.slide_range + 20.0)
++                & (np.abs(local[:, 1] - mission.y_road) < 18.0))
++        if not keep.any():
++            return
++        cells = np.round(local[keep] / self.parking_voxel).astype(np.int64)
++        stamp = self.observation_stamp
++        self.park_voxels.update(dict.fromkeys(map(tuple, cells), stamp))
++        if len(self.park_voxels) > 50000:            # 오래된 칸 정리
++            old = stamp - self.parking_point_window
++            self.park_voxels = {c: t for c, t in self.park_voxels.items() if t >= old}
++
++    def parking_points(self, mission):
++        """최근 parking_point_window(s) 동안 본 관측점 (map, (N,2)). 위치 추정 오차가 천천히 바뀌므로 오래된 점을
++        빼서 지금 자기 위치와 같은 기준의 점만 씀 (GNSS 노이즈 시험에서 누적 점의 slide가 0.3 m 흘렀음)."""
++        if not self.park_voxels or self.observation_stamp is None:
++            return np.zeros((0, 2))
++        old = self.observation_stamp - self.parking_point_window
++        cells = [c for c, t in self.park_voxels.items() if t >= old]
++        if not cells:
++            return np.zeros((0, 2))
++        frame = SlotFrame(mission.slot_center, mission.slot_yaw)
++        return frame.to_map(np.asarray(cells, dtype=float) * self.parking_voxel)
++
++    def parking_candidate_params(self):
++        r = self.park_cfg.min_radius
++        g = lambda name: self.get_parameter(name).value
++        return {
++            'parallel_parking': dict(
++                radii=[r * float(v) for v in g('parallel_radius_scales')],
++                final_lateral=[float(v) for v in g('parallel_final_lateral')],
++                final_back=[float(v) for v in g('parallel_final_back')],
++                start_lateral=[float(v) for v in g('parallel_start_lateral')],
++                shift_radius=12.0, straight_before_stop=0.0, exit_radius=r * float(g('parallel_exit_radius_scale')),
++                hold_s=self.parking_hold_s, cost_per_radius=0.0),
++            'rear_parking': dict(
++                entry_radii=[r * float(v) for v in g('rear_entry_radius_scales')],
++                turn_radii=[max(r, float(v)) for v in g('rear_turn_radii')],
++                final_back=[float(v) for v in g('rear_final_back')],
++                passage_offsets=[float(v) for v in g('rear_passage_offsets')],
++                final_lateral=float(g('rear_final_lateral')), straight_before=0.0, straight_after_turn=0.0,
++                exit_turn_radius=r * float(g('rear_exit_turn_radius_scale')),
++                exit_radius=r * float(g('rear_exit_radius_scale')),
++                exit_passage_offset=float(g('rear_exit_passage_offset')), hold_s=self.parking_hold_s),
++        }
++
++    def parking_detect(self, station, speed, now):
++        """칸을 찾고 확정되면 동작을 경로에 넣음. 반환: 아직 칸을 못 찾았을 때의 속력 상한 (없으면 inf)."""
++        mission = self.active_parking()
++        if mission is None or self.park_plan is not None:
++            return math.inf
++        frame = SlotFrame(mission.slot_center, mission.slot_yaw)
++        # 거리는 경로 거리로 잼 (칸 좌표계 x는 칸 근처 직선 도로에서만 뜻이 있음: 출발 쪽에서는 -120 m로 보였음)
++        a0, car = mission.station, station
++        if a0 - car > self.parking_detect_range or car > a0 + mission.slide_range + 15.0:
++            return math.inf
++        det, points = self.stable_detection(mission)
++        if det is not None and self.start_parking(mission, det, points):
++            return math.inf
++        if now - getattr(self, 'park_log_time', -1e9) > 1.0:          # 칸을 찾는 중: 1 s마다 상태 기록
++            self.park_log_time = now
++            self.get_logger().info(f'{mission.id}: 칸 찾는 중 (존 중심까지 {a0 - car:.1f} m) {self.park_info} '
++                                   f'기록 {[round(v, 2) for v in self.park_history]}')
++        # 칸을 확정하기 전에는 (존 중심 - slide 범위 - commit 거리)에서 멈춰 기다림. 오래 못 찾으면 천천히 다가감
++        gap = a0 - mission.slide_range - self.parking_commit_distance - car
++        cap = math.sqrt(2 * self.parking_commit_decel * max(0.0, gap))
++        if cap < 0.3:
++            cap = 0.0
++            if self.park_wait_since is None and abs(speed) < 0.1:
++                self.park_wait_since = now
++            if self.park_wait_since is not None and now - self.park_wait_since > 4.0:
++                cap = 1.0 if a0 - car > mission.slide_range + 6.0 else 0.0
++        self.park_info['wait_cap'] = round(cap, 2)
++        return cap
++
++    def stable_detection(self, mission):
++        """모은 점으로 칸을 찾아 기록에 넣고, 연속 parking_stable_scans번 slide가 parking_stable_tol 안이면 그 중앙값."""
++        points = self.parking_points(mission)
++        length = float(self.get_parameter('parallel_opening_length' if mission.type == 'parallel_parking'
++                                          else 'rear_opening_length').value)
++        det = detect_slot(mission, points, mission.y_road, self.park_cfg, length if length > 0 else None)
++        info = {'parking': mission.id, 'points': len(points)}
++        if det is None:
++            self.park_info.update(info)
++            return None, points
++        if getattr(self, 'park_history_id', None) != mission.id:     # 미션이 바뀌면 기록을 새로
++            self.park_history, self.park_history_id = [], mission.id
++        self.park_history = (self.park_history + [det['slide']])[-int(self.parking_stable_scans):]
++        info.update(slide=round(det['slide'], 2), gap=[round(v, 2) for v in det['gap']], wall=round(det['wall'], 2))
++        self.park_info.update(info)
++        if (len(self.park_history) < int(self.parking_stable_scans)
++                or max(self.park_history) - min(self.park_history) > self.parking_stable_tol):
++            return None, points
++        det['slide'] = float(np.median(self.park_history))
++        det['slot_center'] = mission.slot_center + det['slide'] * mission.slide_axis
++        return det, points
++
++    def refine_parking(self, i):
++        """동작 시작 parking_refine_until(m) 전까지는 칸을 계속 찾아, slide가 바뀌면 동작을 다시 만들어 넣음
++        (멀리서는 입구 먼 쪽 끝이 비스듬히 보여 덜 정확함)."""
++        plan = self.park_plan
++        sp = plan['spliced']
++        if self.park_seg != 0 or i >= sp.first:
++            return
++        if self.reference.stations[sp.first] - self.reference.stations[i] < self.parking_refine_until:
++            return
++        mission = plan['mission']
++        det, points = self.stable_detection(mission)
++        if det is None or abs(det['slide'] - plan['detection']['slide']) < self.parking_refine_tol:
++            return
++        old = plan['detection']['slide']
++        points_in, yaws_in, gears_in = plan['route_in']
++        self.route.points, self.route_yaws, self.route_gears = list(points_in), yaws_in, gears_in
++        self.route_spliced = yaws_in is not None
++        offsets = self.park_offsets
++        self.park_offsets = list(plan['offsets_in'])
++        self.reference = ReferencePath(self.route.points)
++        if not self.start_parking(mission, det, points):
++            self.get_logger().warn(f'{mission.id}: 다시 만든 동작이 없어 이전 동작 유지')
++            self.park_done.discard(mission.id)
++            self.route.points = [(float(px), float(py)) for px, py in sp.points]
++            self.route_yaws, self.route_gears = sp.yaws, sp.gears
++            self.reference = ReferencePath(self.route.points)
++            self.route_spliced = True
++            self.park_offsets = offsets
++            self.park_plan = plan
++        else:
++            self.get_logger().info(f'{mission.id}: slide {old:+.2f} → {det["slide"]:+.2f} m로 동작 다시 넣음')
++
++    def start_parking(self, mission, det, points):
++        cfg = self.park_cfg
++        params = self.parking_candidate_params()[mission.type]
++        free = [float(v) for v in self.get_parameter(
++            'parallel_parking_free' if mission.type == 'parallel_parking' else 'rear_parking_free').value]
++        rects = [tuple(free[k:k + 4]) for k in range(0, len(free) - 3, 4)]
++        maneuver = plan_maneuver(mission, det, mission.y_road, cfg, params, rects, points,
++                                 log=self.get_logger().warn)
++        if maneuver is None:
++            # 관측점 검사를 빼고 다시 (LiDAR 잡음 점이 자유 공간 안에 있는 경우)
++            maneuver = plan_maneuver(mission, det, mission.y_road, cfg, params, rects, None,
++                                     log=self.get_logger().warn)
++            if maneuver is None:
++                # 포기하지 않음: 주차를 안 하고 다음 체크포인트를 지나면 시도 전체가 실패. 다음 주기에 다시 찾음
++                self.get_logger().error(f'{mission.id}: 주차 동작을 만들지 못함 (slide {det["slide"]:+.2f}), 다시 찾음')
++                self.park_history = []
++                return False
++            self.get_logger().warn(f'{mission.id}: 관측점 검사를 통과한 후보가 없어 벽 모형만으로 고름')
++        route_in = (list(self.route.points), self.route_yaws if self.route_spliced else None,
++                    self.route_gears if self.route_spliced else None)
++        spliced = splice_route(route_in[0], maneuver, mission, self.wheelbase, route_in[1], route_in[2])
++        if spliced is None or (self.route.idx is not None and spliced.first <= self.route.idx + 2):
++            self.get_logger().error(f'{mission.id}: 주차 동작을 경로에 넣지 못함 (이미 지나침)')
++            self.park_done.add(mission.id)
++            return False
++        self.route.points = [(float(px), float(py)) for px, py in spliced.points]
++        self.route_yaws, self.route_gears = spliced.yaws, spliced.gears
++        self.reference = ReferencePath(self.route.points)
++        self.route_spliced = True
++        offsets_in = list(self.park_offsets)
++        self.park_offsets = offsets_in + [splice_offset(route_in[0], spliced)]
++        self.park_plan = {'mission': mission, 'spliced': spliced, 'maneuver': maneuver, 'route_in': route_in,
++                          'detection': det, 'rects': rects, 'vmax': self.parking_vmax(spliced),
++                          'offsets_in': offsets_in}
++        self.park_seg = 0
++        self.park_stop_since = self.park_hold_since = None
++        self.get_logger().info(
++            f'{mission.id}: 칸 slide {det["slide"]:+.2f} m (입구 {det["gap"][0]:+.1f}~{det["gap"][1]:+.1f}, '
++            f'벽 {det["wall"]:.2f} m), 칸 중심 ({det["slot_center"][0]:.2f}, {det["slot_center"][1]:.2f}), '
++            f'동작 {maneuver.info}, 구간 ' + ', '.join(f'{s[5]}({"R" if s[2] < 0 else "D"}) {s[0]}~{s[1]}'
++                                                     for s in spliced.segments))
++        self.publish_parking_markers()
++        return True
++
++    def plan_parking(self, path, p, yaw, speed, now):
++        """주차 동작 진행: 지금 구간만 발행, 정지 지점에서 멈추면 다음 구간으로."""
++        plan = self.park_plan
++        sp = plan['spliced']
++        segs = sp.segments
++        a, b, gear, stop, hold, name, end_pose = segs[self.park_seg]
++        heading = np.array([math.cos(yaw), math.sin(yaw)])
++        rear = np.array([p.x, p.y])
++        ref = rear if gear == REVERSE or a > sp.last else rear + self.wheelbase * heading
++        if self.route.idx is None or self.route.idx < a:
++            self.route.idx = a
++        i = self.route.nearest(float(ref[0]), float(ref[1]), end=b + 1)
++        if self.park_seg == 0 and i < sp.first:
++            self.refine_parking(i)
++            if self.park_plan is not plan:
++                return self.plan_parking(path, p, yaw, speed, now) if self.park_plan is not None else None
++            plan, sp = self.park_plan, self.park_plan['spliced']
++            segs = sp.segments
++            a, b, gear, stop, hold, name, end_pose = segs[self.park_seg]
++        moving = abs(speed) >= self.parking_stopped_speed
++        if moving:
++            self.park_stop_since = None
++        elif self.park_stop_since is None:
++            self.park_stop_since = now
++        rem = math.inf
++        end = sp.points[b]
++        if gear == REVERSE and stop and plan['mission'].type == 'rear_parking':
++            end = end + self.back_wall_shift(plan, now)
++        if stop:
++            direction = sp.yaws[b] + (math.pi if gear == REVERSE else 0.0)
++            rem = float(np.dot(end - ref, [math.cos(direction), math.sin(direction)]))
++            stopped_for = 0.0 if self.park_stop_since is None else now - self.park_stop_since
++            arrived = rem < self.parking_stop_tolerance or (rem < self.parking_accept_short
++                                                            and stopped_for > self.parking_short_wait)
++            if arrived and not moving:
++                if hold > 0:
++                    if self.park_hold_since is None:
++                        self.park_hold_since = now
++                        self.get_logger().info(f'{plan["mission"].id}: 칸 도착 (남은 거리 {rem:+.2f} m), {hold:.1f} s 유지')
++                        self.replan_exit(p, yaw)
++                if hold <= 0 or now - self.park_hold_since >= hold:
++                    self.get_logger().info(f'{plan["mission"].id}: {name} 끝 (남은 거리 {rem:+.2f} m)')
++                    self.park_seg += 1
++                    self.route.idx = segs[self.park_seg][0]
++                    self.park_stop_since = self.park_hold_since = None
++                    return self.plan_parking(path, p, yaw, speed, now)
++            elif moving:
++                self.park_hold_since = None
++        # 동작을 다 끝내고 기존 경로로 돌아옴
++        if self.park_seg == len(segs) - 1 and i > sp.last:
++            self.park_done.add(plan['mission'].id)
++            self.get_logger().info(f'{plan["mission"].id}: 주차 동작 끝, 기존 경로로')
++            self.park_plan = None
++            self.park_history = []                      # 다음 미션의 검출 기록은 새로 (앞 미션 slide가 섞이지 않게)
++            self.park_voxels = {}
++            self.park_info = {}
++            return None
++        # 발행: 지금 구간 안에서만 (cusp 너머로 이어지지 않게)
++        step = max(1e-3, float(np.median(np.linalg.norm(np.diff(sp.points[a:b + 1], axis=0), axis=1)))) \
++            if b > a else 0.25
++        first = max(a, i - int(self.behind_m / step))
++        last = min(b, i + int(self.ahead_m / step))
++        if last - first < 1:
++            first = max(a, last - 1)
++        for k in range(first, last + 1):
++            ps = PoseStamped(header=path.header)
++            ps.pose.position.x, ps.pose.position.y = map(float, end if k == b else sp.points[k])
++            ps.pose.orientation.z, ps.pose.orientation.w = math.sin(sp.yaws[k] / 2), math.cos(sp.yaws[k] / 2)
++            path.poses.append(ps)
++        # 속력: 기본 상한, 원호 횡가속도, 정지 지점 감속, 유지
++        # 이 구간의 점별 상한(기본·원호 횡가속도)을 감속도 parking_stop_decel로 앞에서부터 미리 반영
++        vmax, stations = plan['vmax'], self.reference.stations
++        hi = b + 1 if b < sp.last else sp.last + 1
++        ahead = np.arange(i, max(i + 1, hi))
++        cap = float(np.min(np.sqrt(vmax[ahead] ** 2 + 2 * self.parking_approach_decel
++                                   * np.maximum(0.0, stations[ahead] - stations[i]))))
++        if i < sp.first or i > sp.last:   # 기존 경로 위: 경로 속도 프로파일도
++            cap = min(cap, self.profile_speed(float(stations[i]), speed))
++        if stop:
++            ramp = math.sqrt(2 * self.parking_stop_decel * max(0.0, rem - 0.5 * self.parking_stop_tolerance))
++            cap = min(cap, ramp if ramp > 0.25 else 0.0)
++        if self.park_hold_since is not None:
++            cap = 0.0
++        cap = max(0.0, cap)
++        # 부호 = 방향, 크기 2 = 발행한 경로의 끝이 정지 지점, 1 = 경로가 이어짐. 동작 시작 전(기존 경로 위)은 0
++        mode = (-1 if gear == REVERSE else 1) * (2 if stop and last == b else 1)
++        if i < sp.first and mode == 1:
++            mode = 0
++        self.pub.publish(path)
++        self.speed_pub.publish(Float32(data=float(cap)))
++        self.gear_pub.publish(Int8(data=mode))
++        self.park_info = {'parking': plan['mission'].id, 'segment': name, 'seg': self.park_seg,
++                          'gear': int(gear), 'remaining': round(rem, 2) if math.isfinite(rem) else None,
++                          'hold': round(now - self.park_hold_since, 1) if self.park_hold_since else None}
++        self.publish_status('parking_' + name, speed=cap)
++        return True
++
++    def back_wall_shift(self, plan, now):
++        """후면주차 후진: 방 북쪽 벽(칸 좌표계 x = rear_back_wall_x)을 지금 스캔에서 직접 재서 후진 정지 지점을
++        옮길 거리 (map 벡터). 위치 추정 오차가 있어도 벽에 대한 상대 위치로 서게 함."""
++        mission, maneuver = plan['mission'], plan['maneuver']
++        clusters = self.fresh_clusters(now)
++        shift = plan.get('wall_shift', 0.0)
++        if clusters:
++            frame = SlotFrame(maneuver.slot_center, mission.slot_yaw)
++            pts = frame.to_local(np.vstack(clusters))
++            x_wall = self.rear_back_wall_x
++            sel = (np.abs(pts[:, 1]) < 1.6) & (np.abs(pts[:, 0] - x_wall) < self.parking_wall_search)
++            if np.count_nonzero(sel) >= 10:
++                measured = float(np.median(pts[sel, 0])) - x_wall
++                measured = max(-self.parking_wall_search, min(self.parking_wall_search, measured))
++                shift = measured if 'wall_shift' not in plan else 0.7 * shift + 0.3 * measured
++                if abs(shift - plan.get('wall_logged', 99.0)) > 0.05:
++                    plan['wall_logged'] = shift
++                    self.get_logger().info(f'{mission.id}: 뒤 벽 {x_wall + measured:+.2f} m (예상 {x_wall:+.2f}), '
++                                           f'후진 정지 지점 {shift:+.2f} m 옮김')
++                plan['wall_shift'] = shift
++        return shift * np.array([math.cos(mission.slot_yaw), math.sin(mission.slot_yaw)])
++
++    def parking_vmax(self, sp):
++        """경로 점별 속력 상한: 동작 안은 전진 parking_speed·후진 parking_reverse_speed와 원호 횡가속도
++        (차 방향 변화 / 거리, 앞뒤 1 m 최대), 동작 밖은 제한 없음(경로 속도 프로파일이 따로 적용)."""
++        n = len(sp.points)
++        vmax = np.full(n, np.inf)
++        a, b = sp.first, sp.last
++        base = np.where(sp.gears[a:b + 1] < 0, self.parking_reverse_speed, self.parking_speed)
++        d = np.maximum(np.linalg.norm(np.diff(sp.points[a:b + 2], axis=0), axis=1), 1e-3)
++        dyaw = np.abs(np.diff(np.unwrap(sp.yaws[a:b + 2])))
++        kappa = np.where(d > 1.0, 0.0, dyaw / d)        # 정지 지점(앞바퀴 축 ↔ 뒤차축 점 사이 3 m 건너뜀)은 제외
++        kappa = np.maximum.reduce([np.roll(kappa, k) for k in range(-4, 5)])
++        vmax[a:b + 1] = np.minimum(base, np.sqrt(self.parking_lateral_accel / np.maximum(kappa, 1e-6)))
++        return vmax
++
++    def replan_exit(self, p, yaw):
++        """평행주차: 칸에 선 실제 자세에서 나가는 전진 S자를 다시 만들어 경로의 마지막 구간을 바꿈."""
++        plan = self.park_plan
++        mission, maneuver = plan['mission'], plan['maneuver']
++        if mission.type != 'parallel_parking':
++            return
++        frame = SlotFrame(maneuver.slot_center, mission.slot_yaw)
++        local = frame.to_local(np.array([p.x, p.y]))
++        pose = (float(local[0]), float(local[1]), float((yaw - mission.slot_yaw + math.pi) % (2 * math.pi) - math.pi))
++        wall = plan['detection'].get('wall', self.park_cfg.wall_default)
++        if abs(wall - self.park_cfg.wall_default) > 0.25:
++            wall = self.park_cfg.wall_default
++        rects = [(-80.0, 80.0, mission.y_road - wall, mission.y_road + wall)] + plan['rects']
++        scale = float(self.get_parameter('parallel_exit_radius_scale').value)
++        for clearance in (self.park_cfg.clearance, 0.5 * self.park_cfg.clearance):
++            cfg = ParkingConfig(**{**self.park_cfg.__dict__, 'clearance': clearance})
++            for k in (1.0, 1.1, 1.2, 1.35):
++                poses = parallel_exit(pose, mission.y_road, self.park_cfg.min_radius * scale * k)
++                if poses is None or not free_space_ok(poses, rects, cfg)[0]:
++                    continue
++                exit_segment = Segment(FORWARD, frame.poses_to_map(poses), False, 0.0, 'exit')
++                new = Maneuver(maneuver.segments[:-1] + [exit_segment], maneuver.slot_center, maneuver.slide,
++                               maneuver.start_x, float(poses[-1][0]), maneuver.info)
++                points, yaws, gears = plan['route_in']
++                spliced = splice_route(points, new, mission, self.wheelbase, yaws, gears)
++                if spliced is None or spliced.segments[-1][0] != plan['spliced'].segments[-1][0]:
++                    continue
++                self.route.points = [(float(px), float(py)) for px, py in spliced.points]
++                self.route_yaws, self.route_gears = spliced.yaws, spliced.gears
++                self.reference = ReferencePath(self.route.points)
++                self.park_offsets = plan['offsets_in'] + [splice_offset(points, spliced)]
++                plan['spliced'], plan['maneuver'] = spliced, new
++                plan['vmax'] = self.parking_vmax(spliced)
++                self.get_logger().info(f'{mission.id}: 실제 자세 {np.round(pose, 2).tolist()}에서 나가는 경로 다시 만듦 '
++                                       f'(R {self.park_cfg.min_radius * scale * k:.2f}, 여유 {clearance:.2f})')
++                self.publish_parking_markers()
++                return
++        self.get_logger().warn(f'{mission.id}: 실제 자세 {np.round(pose, 2).tolist()}에서 나가는 경로를 못 만들어 계획대로 나감')
++
++    def publish_parking_markers(self):
++        if self.park_plan is None:
++            return
++        sp = self.park_plan['spliced']
++        header = Path().header
++        header.frame_id = 'map'
++        header.stamp = self.get_clock().now().to_msg()
++        markers = [Marker(action=Marker.DELETEALL)]
++        for n, (a, b, gear, *_rest) in enumerate(sp.segments):
++            m = Marker(header=header, ns='parking_segments', id=n, type=Marker.LINE_STRIP, action=Marker.ADD)
++            m.pose.orientation.w = 1.0
++            m.scale.x = 0.08
++            m.color.a = 1.0
++            m.color.r, m.color.g, m.color.b = (0.9, 0.3, 0.1) if gear == REVERSE else (0.1, 0.6, 0.95)
++            m.points = [Point(x=float(x), y=float(y), z=0.2) for x, y in sp.points[a:b + 1]]
++            markers.append(m)
++        slot = Marker(header=header, ns='parking_slot', id=0, type=Marker.LINE_STRIP, action=Marker.ADD)
++        mission, centre = self.park_plan['mission'], self.park_plan['maneuver'].slot_center
++        frame = SlotFrame(centre, mission.slot_yaw)
++        hl, hw = mission.slot_length / 2, mission.slot_width / 2
++        corners = frame.to_map(np.array([[hl, hw], [hl, -hw], [-hl, -hw], [-hl, hw], [hl, hw]]))
++        slot.pose.orientation.w = 1.0
++        slot.scale.x = 0.08
++        slot.color.g = slot.color.a = 1.0
++        slot.points = [Point(x=float(x), y=float(y), z=0.2) for x, y in corners]
++        markers.append(slot)
++        self.park_marker_pub.publish(MarkerArray(markers=markers))
++
+     def fresh_clusters(self, now):
+         if (self.obstacles is None or self.observation_stamp is None
+                 or not -self.clock_tolerance - 1e-6 <= now - self.observation_stamp <= self.obstacle_timeout):
+@@ -356,6 +876,7 @@
+             self.obstacles = None
+             return
+         self.observation_stamp = stamp
++        self.collect_parking_points(self.obstacles)
+         if self.npc is not None:
+             self.npc.update(stamp, self.obstacles)
+ 
+@@ -376,6 +897,11 @@
+         path = Path()
+         path.header.stamp = self.get_clock().now().to_msg()
+         path.header.frame_id = 'map'
++        q = self.odom.pose.pose.orientation
++        yaw = math.atan2(2 * (q.w*q.z + q.x*q.y), 1 - 2 * (q.y*q.y + q.z*q.z))
++        speed = self.odom.twist.twist.linear.x
++        if self.park_plan is not None and self.plan_parking(path, p, yaw, speed, now):
++            return
+         i = self.route.nearest(p.x, p.y)
+         if self.route.past_end(p.x, p.y):
+             self.publish_stop('route_end')
+@@ -383,6 +909,10 @@
+         station = float(self.reference.stations[min(i, len(self.reference.stations) - 1)])
+         route_speed = self.profile_speed(station, self.odom.twist.twist.linear.x)
+         route_speed = min(route_speed, self.dynamic_limit(station, p.x, p.y, self.odom.twist.twist.linear.x, now))
++        self.park_station = self.base_station(station)     # 주차 미션 거리(원래 경로 기준)와 비교
++        route_speed = min(route_speed, self.parking_detect(self.park_station, speed, now))
++        if self.park_plan is not None and self.plan_parking(path, p, yaw, speed, now):
++            return
+         in_zone = self.avoidance_ranges is None or any(a <= station <= b for a, b in self.avoidance_ranges)
+         if not in_zone:
+             self.previous = None
+@@ -398,14 +928,13 @@
+                 path.poses.append(ps)
+             self.pub.publish(path)
+             self.speed_pub.publish(Float32(data=route_speed))
++            self.gear_pub.publish(Int8(data=0))
+             self.publish_status('reference_only', speed=route_speed)
+             return
+         if (self.obstacles is None or self.observation_stamp is None
+                 or not -self.clock_tolerance - 1e-6 <= now - self.observation_stamp <= self.obstacle_timeout):
+             self.publish_stop('sensor_unavailable')
+             return
+-        q = self.odom.pose.pose.orientation
+-        yaw = math.atan2(2 * (q.w*q.z + q.x*q.y), 1 - 2 * (q.y*q.y + q.z*q.z))
+         ego = Ego(p.x, p.y, yaw, self.odom.twist.twist.linear.x)
+         result = plan_avoidance(self.reference, ego, self.obstacles, self.cfg,
+                                 self.previous, float(self.reference.stations[i]))
+@@ -425,6 +954,7 @@
+         tight = result.reason == 'tight'           # 여유를 줄여 찾은 경로: 회피 경로가 아니어도 천천히
+         speed = min(route_speed, float(result.speed)) if avoiding or tight else route_speed
+         self.speed_pub.publish(Float32(data=speed))
++        self.gear_pub.publish(Int8(data=0))
+         self.previous = result.selected
+         self.publish_status('avoiding' if avoiding else 'following',
+                             result.candidates, result.selected.offset, speed, tight)
+@@ -478,9 +1008,20 @@
+                 zones=zones)
+         self.profile_reference = self.reference
+ 
++    def base_station(self, station):
++        """끼운 경로의 경로 거리 → 동작을 끼우기 전 경로의 경로 거리 (동작 뒤 구간만 옮겨짐)."""
++        for threshold, delta in reversed(getattr(self, 'park_offsets', [])):
++            if station >= threshold:
++                station -= delta
++        return station
++
+     def profile_speed(self, station, speed):
+         """속도 프로파일에서 지금부터 speed_preview_s 동안 지날 구간의 가장 낮은 제한."""
+-        if getattr(self, 'profile_reference', None) is not self.reference:
++        if self.route_spliced:
++            # 동작을 끼운 경로: 원래 경로의 속도 프로파일을 그대로 쓰고 경로 거리만 원래 경로 기준으로 옮김
++            # (끼운 경로 전체로 다시 만들면 정지 지점의 스플라인 꼬임이 동작 뒤 구간까지 느리게 만들었음)
++            station = self.base_station(station)
++        elif getattr(self, 'profile_reference', None) is not self.reference:
+             self.build_profile()
+         ahead = station + max(speed, 0.0) * self.speed_preview_s + 1.0
+         lo, hi = np.searchsorted(self.profile_s, [station, ahead])
+@@ -501,6 +1042,7 @@
+         payload = {'state': reason, 'offset_m': float(offset), 'speed_limit_mps': float(speed), 'tight': bool(tight),
+                    'candidate_results': dict(Counter(c.reason for c in candidates))}
+         payload.update(self.dynamic_info)
++        payload.update(self.park_info)
+         self.status_pub.publish(String(data=json.dumps(payload)))
+         label = reason + (' (여유 축소)' if tight else '')
+         if self.dynamic_info.get('roundabout'):
+@@ -561,6 +1103,16 @@
+         self.marker_pub.publish(MarkerArray(markers=markers))
+ 
+ 
++def splice_offset(points_in, spliced):
++    """끼운 경로에서 동작 뒤 첫 점의 경로 거리와, 그 점의 원래(끼우기 전) 경로 거리와의 차이."""
++    points_in = np.asarray(points_in, dtype=float)
++    j = spliced.last + 1
++    s_new = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(spliced.points[:j + 1], axis=0), axis=1))]
++    i1 = int(np.argmin(np.linalg.norm(points_in - spliced.points[j], axis=1)))
++    s_in = float(np.sum(np.linalg.norm(np.diff(points_in[:i1 + 1], axis=0), axis=1)))
++    return float(s_new[j]), float(s_new[j] - s_in)
++
++
+ def main(args=None):
+     rclpy.init(args=args)
+     node = Planner()
+diff -ruN a/hk_mit/test/test_parking.py b/hk_mit/test/test_parking.py
+--- a/hk_mit/test/test_parking.py	1970-01-01 09:00:00.000000000 +0900
++++ b/hk_mit/test/test_parking.py	2026-11-14 03:29:44.994761700 +0900
+@@ -0,0 +1,113 @@
++"""주차 계산(parking.py) 시험: 합성 벽 점으로 칸 검출, 후보 동작의 칸 안 최종 자세·자유 공간, 경로 끼우기."""
++import math
++import unittest
++
++import numpy as np
++
++from hk_mit.parking import (FORWARD, REVERSE, Mission, ParkingConfig, SlotFrame, detect_slot, free_space_ok,
++                            in_slot, parallel_exit, plan_maneuver, splice_route)
++
++ROAD_X = -13.1647
++PPARK = {'id': 'm_ppark', 'type': 'parallel_parking',
++         'slot': {'center': [-18.1147, 120.7754], 'yaw': -math.pi / 2, 'length': 7.4, 'width': 3.6},
++         'zone': [[-15.6647, 113.2754], [-15.6647, 128.2754], [-20.6647, 128.2754], [-20.6647, 113.2754]],
++         'slide': {'axis': [0.0, 1.0], 'range': 3.0}}
++RPARK = {'id': 'm_rpark', 'type': 'rear_parking',
++         'slot': {'center': [0.3353, 82.9754], 'yaw': -math.pi / 2, 'length': 5.4, 'width': 3.6},
++         'zone': [[3.3353, 63.2754], [3.3353, 89.2754], [-10.6647, 89.2754], [-10.6647, 63.2754]],
++         'slide': {'axis': [0.0, 1.0], 'range': 3.0}}
++PARAMS = {
++    'parallel_parking': dict(radii=[4.43], final_lateral=[0.6, 0.5], final_back=[1.1, 1.0], start_lateral=[0.0],
++                             shift_radius=12.0, straight_before_stop=0.0, exit_radius=4.43, hold_s=3.2,
++                             cost_per_radius=0.0),
++    'rear_parking': dict(entry_radii=[5.0], turn_radii=[4.7], final_back=[0.05], passage_offsets=[-0.5, -0.75],
++                         final_lateral=-0.2, straight_before=0.0, straight_after_turn=0.0, exit_turn_radius=4.43,
++                         exit_radius=4.43, exit_passage_offset=-0.25, hold_s=3.2),
++}
++FREE = {'parallel_parking': [(-4.0, 4.0, -2.05, 2.5)],
++        'rear_parking': [(4.2, 9.2, -11.0, -2.0), (-2.8, 16.2, -2.475, 2.525)]}
++
++
++def wall_points(side_x, y0, y1, gap, face_depth):
++    """도로 옆 벽 선(x = side_x)을 y0~y1에 0.2 m 간격으로, gap=(남쪽 끝, 북쪽 끝) 구간은 비우고, 남쪽 끝에는
++    입구 안쪽 면(도로에서 멀어지는 방향으로 face_depth) 점을 둠."""
++    ys = np.arange(y0, y1, 0.2)
++    ys = ys[(ys < gap[0]) | (ys > gap[1])]
++    pts = [np.column_stack((np.full_like(ys, side_x), ys))]
++    xs = side_x + np.sign(side_x - ROAD_X) * np.arange(0.0, face_depth, 0.2)
++    pts.append(np.column_stack((xs, np.full_like(xs, gap[0]))))
++    return np.vstack(pts)
++
++
++def route():
++    ys = np.arange(160.0, 30.0, -0.5)
++    return np.column_stack((np.full_like(ys, ROAD_X), ys))
++
++
++class ParkingTests(unittest.TestCase):
++    def setUp(self):
++        self.cfg = ParkingConfig(radius_margin=1.05, clearance=0.3, slot_margin=0.15)
++
++    def test_detects_slide_from_wall_opening(self):
++        mission = Mission.from_json(PPARK)
++        for slide in (-2.5, 0.0, 1.8):
++            c = 120.7754 + slide
++            pts = wall_points(-16.165, 95.0, 150.0, (c - 4.0, c + 4.0), 4.0)
++            det = detect_slot(mission, pts, 4.95, self.cfg, 8.0)
++            self.assertIsNotNone(det)
++            self.assertAlmostEqual(det['slide'], slide, delta=0.15)
++
++    def test_rear_detection_uses_passage_and_zone_offset(self):
++        mission = Mission.from_json(RPARK)
++        slide = -1.7
++        c = 76.2754 + slide                               # 통로 중심 = 존 중심 + slide
++        pts = wall_points(-10.165, 50.0, 100.0, (c - 2.5, c + 2.5), 8.0)
++        det = detect_slot(mission, pts, -13.5, self.cfg, 5.0)
++        self.assertIsNotNone(det)
++        self.assertAlmostEqual(det['slide'], slide, delta=0.15)
++        self.assertAlmostEqual(det['slot_center'][1], 82.9754 + slide, delta=0.15)
++
++    def test_maneuvers_end_in_slot_and_stay_in_free_space(self):
++        for raw, y_road in ((PPARK, 4.95), (RPARK, -13.5)):
++            mission = Mission.from_json(raw)
++            det = {'slide': 0.0, 'slot_center': mission.slot_center, 'wall': 3.0}
++            maneuver = plan_maneuver(mission, det, y_road, self.cfg, PARAMS[mission.type], FREE[mission.type])
++            self.assertIsNotNone(maneuver, mission.type)
++            self.assertEqual([s.gear for s in maneuver.segments], [FORWARD, REVERSE, FORWARD])
++            frame = SlotFrame(mission.slot_center, mission.slot_yaw)
++            final = maneuver.segments[1].poses[-1]
++            local = np.r_[frame.to_local(final[:2]), final[2] - mission.slot_yaw]
++            self.assertTrue(in_slot(local, mission.slot_length, mission.slot_width, 0.05, self.cfg))
++            # 곡률 ≤ 1/R_min (원호 사이 정지 지점 제외)
++            for s in maneuver.segments:
++                if len(s.poses) < 2:
++                    continue
++                d = np.linalg.norm(np.diff(s.poses[:, :2], axis=0), axis=1)
++                k = np.abs(np.diff(np.unwrap(s.poses[:, 2]))) / np.maximum(d, 1e-6)
++                self.assertLessEqual(float(np.max(k)), 1.0 / self.cfg.min_radius + 1e-3)
++
++    def test_splice_keeps_prefix_and_segments_do_not_overlap(self):
++        mission = Mission.from_json(PPARK)
++        det = {'slide': 1.0, 'slot_center': mission.slot_center + [0.0, 1.0], 'wall': 3.0}
++        maneuver = plan_maneuver(mission, det, 4.95, self.cfg, PARAMS[mission.type], FREE[mission.type])
++        r = route()
++        sp = splice_route(r, maneuver, mission, 3.0)
++        self.assertIsNotNone(sp)
++        np.testing.assert_allclose(sp.points[:sp.first], r[:sp.first])
++        ends = [s[1] for s in sp.segments]
++        starts = [s[0] for s in sp.segments]
++        self.assertEqual(starts[1:], [e + 1 for e in ends[:-1]])
++        self.assertTrue(np.all(sp.gears[starts[1]:ends[1] + 1] == REVERSE))
++        self.assertGreater(float(np.min(np.linalg.norm(np.diff(sp.points, axis=0), axis=1))), 1e-3)
++
++    def test_parallel_exit_from_rotated_pose(self):
++        rects = [(-80, 80, 1.95, 7.95)] + FREE['parallel_parking']
++        poses = parallel_exit((-2.6, 0.6, math.radians(5.0)), 4.95, 4.43)
++        self.assertIsNotNone(poses)
++        self.assertAlmostEqual(poses[-1][1], 4.95, delta=0.05)
++        self.assertAlmostEqual(poses[-1][2], 0.0, delta=0.02)
++        self.assertTrue(free_space_ok(poses, rects, ParkingConfig(clearance=0.2))[0])
++
++
++if __name__ == '__main__':
++    unittest.main()

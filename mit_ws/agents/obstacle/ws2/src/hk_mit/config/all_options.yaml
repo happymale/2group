@@ -1,0 +1,37 @@
+# 모든 옵션(노이즈·지연·미션)을 켤 때 bringup.yaml 위에 덮어쓰는 값.
+#   ros2 launch hk_mit bringup.launch.py extra_params:=/mit_ws/install/hk_mit/share/hk_mit/config/all_options.yaml
+hk_mit_planner:
+  ros__parameters:
+    # 장애물 구간은 벽이 y=±3.75 (폭 7.5 m, course.json mission zone). 좁은 통로(4.392 m)의 벽은
+    # LiDAR 충돌 검사가 막으므로 가상 경계는 넓은 구간 기준으로 둡니다 (2.196이면 회피 후보가 전부 road_boundary)
+    road_half_width: 3.75
+    lateral_offsets: [-2.3, -2.0, -1.6, -1.0, 0.0, 1.0, 1.6, 2.0, 2.3]
+    obstacle_timeout: 1.0
+    odom_timeout: 0.5
+    safety_margin: 0.2
+    surface_padding: 0.15
+    # 저마찰 S자(cp2→cp3)는 3.4 m/s 넘으면 미끄러져 감점 (동역학 시험 dyn_lf0~4)
+    # GNSS 음영 S자(cp10→cp11)는 위치 추정 횡오차가 0.6~0.9 m라 8 m/s로 제한 (12.5 m/s면 s=609 감점, tu_b7)
+    # (GNSS 음영 8 m/s 상한은 LiDAR 벽 측정으로 위치 오차가 0.6~1.1 → 0.05 m 수준이 되어 없앰)
+    # 경사 S자(cp4→cp5, R 6.9) 6.0 m/s 상한: corner_lateral_accel 6.0(≈6.4 m/s)이면 S자 전환(s 245~255)에서 안쪽을
+    # 0.8~0.9 m 파고들어 실제 여유(LiDAR 기준) 0.17~0.39 m (sp_w3_s0~s2, sp_w4_s2)
+    speed_zones: [56.0, 165.0, 3.4, 185.0, 272.0, 6.0]
+    # 조향 지연(실측: 0.05 s 지연 + 0.22 s 1차 지연)이 있으면 S자(cp4→cp5)에서 7 → 감점, 6 → 여유 0.28~0.42, 5.5 → 0.45~0.5 m
+    # (저마찰 S자는 위 3.4 상한이 먼저 걸림. 3.7이면 s=80에서 미끄러져 감점, tu_c1)
+    corner_lateral_accel: 6.0    # (벽 측정 전) 6.0이면 0.5~0.7 s 빠르지만 seed 2에서 cp4→cp5 여유 0.25 m (tu_fin_s2) → 감점 위험이 커서 5.5
+    profile_decel: 5.0            # 구동 지연 75 ms + 내리막(경사 구간)에서 감속이 늦음 (4.0 → 5.0 시험, brake=1이면 8.5)
+    speed_preview_s: 0.8
+    # 회전교차로 정지 위치 ~ 진출 직선 상한. 링 구간은 NPC 추종 상한(follow_speed)이 따로 걸림
+    roundabout_speed: 5.5
+hk_mit_localization:
+  ros__parameters:
+    # LiDAR 벽 측정 (wall_match.py). 기본값은 localization.py PARAMS
+    wall_enabled: true
+    corridor_width: 0.0          # 0 = 시도 코스 파일(/data/current/course.json)의 corridor_width_m (도로 폭 단계 반영)
+    wall_inflation: 4.0          # 점들 사이 상관 → 측정 공분산 배율
+    wall_zone_margin: 18.0       # 장애물·주차·회전교차로 구간 앞뒤 이만큼 벽을 쓰지 않음 (실측 폭 변화 구간 ≤ 15 m)
+hk_mit_control:
+  ros__parameters:
+    # 조향 지연 옵션: 0.2면 곡선 진입이 늦어(s=230 감점), 0.35면 너무 일찍 꺾어 안쪽을 파고듦(s=246 감점)
+    latency_s: 0.3
+    k_offset: 0.0                # 0.5 시험: 곡선 중간 안쪽 파고듦은 줄지만 S자 전환에서 바깥→안쪽 흔들림이 커져 여유 0.35 → 0.07~0.11 (sp_seg_off5, off5b)

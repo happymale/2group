@@ -1,0 +1,69 @@
+# MIT 기본 코드 노드 설정. 비운 파일 경로는 이 패키지 course/의 파일(route.csv, course.json)을 씁니다.
+hk_mit_localization:
+  ros__parameters:
+    course_json: ""               # 출발·복귀 자세와 지도 원점
+    # EKF(x, y, yaw, 자이로 바이어스, GNSS 다중경로 바이어스, 바퀴 배율). 나머지 값은 localization.py PARAMS 기본값
+    gnss_gate: 4.0                # 마할라노비스 거리가 이보다 크면 그 GNSS는 버림
+    gnss_reset_m: 3.0             # 이보다 크게 어긋난 GNSS가 gnss_reset_count번 이어지면 GNSS로 다시 맞춤
+hk_mit_planner:
+  ros__parameters:
+    ahead_m: 30.0                 # 차 앞으로 내보낼 경로 길이 (m)
+    behind_m: 2.0                 # 차 뒤로 남길 경로 길이 (m)
+    route_csv: ""                 # 전역 경로 (0.5 m 간격)
+    avoidance_enabled: true
+    path_step: 0.2                # 후보 경로 충돌 검사 간격 (m)
+    road_half_width: 3.75          # 기준 경로 중심의 가정한 도로 반폭. 실제 경계는 코스 파일에 없음
+    safety_margin: 0.35
+    surface_padding: 0.25         # 관측 표면의 불확실성 여유 (m)
+    vehicle_length: 4.635
+    vehicle_width: 1.892
+    rear_overhang: 0.79
+    wheelbase: 3.0
+    max_steer_deg: 35.4
+    max_lateral_accel: 3.0        # 회피 경로 횡가속도 한계 → 곡률 속력 sqrt(a/κ)를 감속 한계로 미리 반영
+    cruise_speed: 10.0            # 직선 최고 속력. launch의 target_speed:=… 가 덮어씀
+    corner_lateral_accel: 4.0     # 곡선 횡가속도 한계 → 곡선 속력 sqrt(a/κ)
+    profile_accel: 2.0            # 속도 프로파일 가속 한계 (m/s²)
+    profile_decel: 3.0            # 곡선 앞 감속 한계 (m/s²)
+    speed_preview_s: 0.6          # 이 시간 앞 구간의 제한까지 미리 반영
+    # 구간별 속력 상한 [시작 s, 끝 s, 상한 m/s, ...]. s는 route.csv 경로 거리(m):
+    # cp1 13, cp2 58, cp3 166.5, cp4 192, cp5 275.4, cp6 405.4, cp7 465.4, cp8 494.9, cp9 529.9, cp10 571.9, cp11 655.9, 결승 670.9
+    speed_zones: [0.0, 0.0, 100.0]
+    avoidance_speed: 10.0         # 회피 중 속력 상한이자 옆 이동·복귀 길이 기준 속력 (길이 = 속력 × 시간)
+    tight_speed: 3.0              # 여유를 줄여(margin 0) 찾은 경로의 속력 상한
+    return_time: 2.0              # 복귀 길이 = avoidance_speed × return_time (구간 끝 전에 끝나게 줄임)
+    return_gap: 1.5               # 마지막 장애물 점 뒤 이만큼 더 간 뒤 복귀 (보이지 않는 뒷면)
+    lateral_offsets: [-2.3, -2.0, -1.6, -1.0, 0.0, 1.0, 1.6, 2.0, 2.3]
+    transition_times: [1.2, 2.0, 3.0]
+    obstacle_timeout: 1.0         # 정지 장애물은 map 좌표로 1 s 지나도 유효. CPU 부하로 한 스캔이 늦어도 멈추지 않게
+    odom_timeout: 0.5 
+    clock_tolerance: 0.05          # 노드 간 /clock 전달 순서 차이 (s)
+hk_mit_lidar_perception:
+  ros__parameters:
+    record_csv: false
+    csv_path: ""
+    jump_base: 0.3
+    jump_scale: 1.5
+    max_obstacle_range: 45.0       # ahead_m + 차체 앞 길이보다 크게 유지
+    scan_timeout: 0.35
+    max_invalid_fraction: 0.1
+hk_mit_control:
+  ros__parameters:
+    target_speed: 10.0            # 목표 속력 상한 (m/s). 실제 속력은 planner의 speed_limit을 따름
+    k_stanley: 2.5                # Stanley: 옆으로 벗어난 거리에 대한 조향 세기. 1.0은 5 m/s 지그재그 회피에서 약 1 s 늦어 장애물 옆 횡위치가 0.3 m 모자람
+    k_soft: 1.0                   # Stanley: 저속에서 조향이 너무 세지지 않게 (m/s)
+    kp: 0.5                       # 속력 P 이득
+    ki: 0.05                      # 속력 I 이득
+    brake_gain: 0.6               # 너무 빠를 때 제동 세기
+    latency_s: 0.1                # 이 시간 뒤 자세를 예측해 조향 (조향 지연 옵션이면 0.25~0.3)
+    k_curvature: 0.5              # 경로 곡률 피드포워드 비율. 회피 경로(옆 이동 quintic)에서 Stanley만으로는 0.5~1 m 늦게 따라가 0.5로 올림
+    k_yaw_rate: 0.0               # 요레이트 감쇠 (고속 진동 시 0.05~0.1)
+    k_offset: 0.0                 # 곡선 바깥 목표 비율 (뒤차축이 안쪽을 파고드는 √(R²+L²)-R 의 몇 배를 앞바퀴 축에서 바깥으로, 0~1)
+    k_slope: 1.0                  # 경사 피드포워드 비율 (IMU 전후 가속도 - 속력 변화율, 1 = 그대로 보상, 0 = 끔)
+    slope_tau: 0.3                # 경사 추정 저역 통과 시간 상수 (s)
+    drive_accel: 4.0              # accel = 1 일 때 가속도 (m/s², 실측 약 4)
+    brake_decel: 8.5              # brake = 1 일 때 감속도 (m/s², 실측 약 8.6)
+    require_plan_speed: true
+    plan_timeout: 0.5
+    odom_timeout: 0.35
+    clock_tolerance: 0.05
